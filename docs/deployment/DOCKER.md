@@ -238,6 +238,36 @@ docker compose up -d
 
 ### Health Checks
 
+**Automated Health Monitoring**:
+
+The container includes a built-in healthcheck that monitors:
+- **PostgreSQL**: Database accepting connections
+- **Redis**: Message broker responsive
+- **Web API**: FastAPI serving requests
+
+```bash
+# View health status
+docker ps --format "table {{.Names}}\t{{.Status}}"
+
+# Detailed health information
+docker inspect lumina --format='{{json .State.Health}}' | python3 -m json.tool
+
+# Health status values:
+#   starting - During 60-second startup period
+#   healthy  - All checks passing
+#   unhealthy - One or more checks failing
+```
+
+**Container Orchestration Integration**:
+
+The healthcheck is exposed through Docker's health API for:
+- **Docker Swarm**: Service availability and routing decisions
+- **Kubernetes**: Liveness and readiness probes (via Docker runtime)
+- **Load Balancers**: Health-based traffic routing
+- **Monitoring Systems**: Automated alerting on unhealthy status
+
+**Manual Health Checks**:
+
 ```bash
 # Container status
 docker compose ps
