@@ -2,214 +2,160 @@
 
 **Illuminate Your Memories**
 
-A professional photo and video library manager with GPU-accelerated analysis, intelligent duplicate detection, and burst sequence organization.
+Professional photo and video library manager with GPU-accelerated analysis, intelligent duplicate detection, and burst sequence organization.
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
+[![Tests](https://img.shields.io/badge/tests-642%20passing-success.svg)](https://github.com/irjudson/lumina)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests](https://img.shields.io/badge/tests-616%20passing-success.svg)](https://github.com/irjudson/lumina)
-[![Coverage](https://img.shields.io/badge/coverage-79%25-green.svg)](https://github.com/irjudson/lumina)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-
-## Quick Links
-
-📖 **[Full Documentation](./docs/)** | 🚀 **[Quick Start](#quick-start)** | 🐛 **[Issues](https://github.com/irjudson/lumina/issues)** | 💬 **[Discussions](https://github.com/irjudson/lumina/discussions)**
 
 ---
 
-## Documentation
+## ⚡ Quick Start (5 Minutes)
 
-Comprehensive documentation is available in the **[docs](./docs)** directory:
+### Prerequisites
+- Docker & Docker Compose
+- nvidia-docker2 (optional, for GPU acceleration)
 
-### Getting Started
-- **[User Guide](./docs/guides/USER_GUIDE.md)** - Complete user documentation and tutorials
-- **[Installation](#installation)** - Get up and running (see below)
-- **[Quick Start](#quick-start)** - Basic workflow in 5 minutes
+### Run Lumina
 
-### Technical Guides
-- **[How It Works](./docs/technical/HOW_IT_WORKS.md)** - Analysis pipeline and processing details
-- **[Date Extraction Guide](./docs/technical/DATE_EXTRACTION_GUIDE.md)** - Date detection and confidence levels
-- **[Architecture](./docs/technical/ARCHITECTURE.md)** - System design and components
-- **[GPU Setup Guide](./docs/guides/GPU_SETUP_GUIDE.md)** - GPU acceleration configuration
+```bash
+# 1. Clone repository
+git clone https://github.com/irjudson/lumina.git
+cd lumina
 
-### Help & Reference
-- **[Troubleshooting](./docs/guides/TROUBLESHOOTING.md)** - Common problems and solutions
-- **[Roadmap](./docs/roadmap/ROADMAP.md)** - Planned features and priorities
-- **[Contributing Guide](./docs/guides/CONTRIBUTING.md)** - Development setup and guidelines
-- **[Development Approach](./docs/technical/DEVELOPMENT_APPROACH.md)** - Human-AI collaboration story
+# 2. Configure
+cp .env.example .env
+nano .env  # Set CATALOG_PATH and PHOTOS_PATH
+
+# 3. Start Lumina
+docker compose up -d
+
+# 4. Open web UI
+open http://localhost:8765
+```
+
+That's it! Lumina is now analyzing your photos.
+
+**New to Lumina?** See the **[Quick Start Guide](docs/guides/QUICK_START.md)** for detailed setup instructions.
 
 ---
 
 ## Features
 
-### Core Functionality
-- **High-Performance Scanning** - Multi-core parallel processing with incremental file discovery for network filesystems
-- **Comprehensive Metadata Extraction** - Extract dates from EXIF, XMP, filenames, and directory structure
-- **RAW File Support** - Native RAW metadata extraction during scanning (no conversion required)
-- **Duplicate Detection** - Find exact and similar duplicates using checksums and perceptual hashing
-- **Quality Scoring** - Multi-factor scoring based on format, resolution, file size, and EXIF completeness
-- **Burst Management** - Automatically detect continuous shooting sequences and select the best image from each burst
-- **Image Status System** - Track active/archived/flagged/rejected/selected states for workflow management
-- **Corruption Detection** - Automatically identify and flag corrupt/empty files to prevent processing errors
-- **Date-Based Reorganization** - Reorganize libraries into date-based directory structures
+### Core Capabilities
+- 🚀 **High-Performance Scanning** - Multi-core parallel processing
+- 🎯 **Smart Duplicate Detection** - Perceptual hashing with quality scoring
+- 📸 **Burst Management** - Auto-detect sequences, select best shot
+- 🏷️ **Comprehensive Metadata** - EXIF, XMP, filename, and directory dates
+- 📁 **RAW Support** - Native metadata extraction (no conversion needed)
+- 🔄 **Date-Based Organization** - Reorganize into chronological structures
+- 🖼️ **Modern Web UI** - Browse, compare, and manage your library
 
 ### Advanced Features
-- **GPU Acceleration** - PyTorch-based GPU acceleration (20-30x faster on compatible GPUs)
-- **Web Interface** - Modern Vue.js web UI with progressive phase-based performance monitoring
-- **Real-Time Performance Tracking** - Live throughput, GPU utilization, and bottleneck analysis
-- **FAISS Similarity Search** - GPU-accelerated similarity search for large catalogs
-- **Network Filesystem Optimization** - Incremental file discovery prevents blocking on slow NAS mounts
-- **Beautiful CLI** - Rich terminal interface with progress bars and formatted output
-
-### Quality & Testing
-- **Fully Tested** - Comprehensive test suite with **616 passing tests** and **79% coverage**
-- **Type Safe** - Full type hints throughout the codebase with Pydantic v2
-- **Fast Tests** - Parallel test execution with pytest-xdist (62.5% faster)
+- ⚡ **GPU Acceleration** - 20-30x faster with CUDA (built into Docker image)
+- 📊 **Real-Time Monitoring** - Live performance dashboard with GPU metrics
+- 🔍 **FAISS Similarity Search** - GPU-accelerated for large catalogs
+- 🛡️ **Corruption Detection** - Auto-flag corrupt or empty files
+- ✅ **Fully Tested** - 642 passing tests, 79% coverage
 
 ---
 
-## Installation
+## Architecture
 
-### Prerequisites
+**Single-container Docker deployment** with all services included:
+- **PostgreSQL** - Catalog data and Celery results
+- **Redis** - Celery task broker
+- **Celery** - Background job processing
+- **FastAPI** - Web API server
+- **Vue.js** - Frontend UI
+- **GPU Support** - NVIDIA MPS for multi-process sharing
 
-- Python 3.8 or higher
-- [ExifTool](https://exiftool.org/) must be installed on your system
-- (Optional) NVIDIA GPU with CUDA support for GPU acceleration
-
-#### Installing ExifTool
-
-**macOS (Homebrew):**
-```bash
-brew install exiftool
-```
-
-**Ubuntu/Debian:**
-```bash
-sudo apt-get install exiftool
-```
-
-**Windows:**
-Download from [exiftool.org](https://exiftool.org/) and add to PATH.
-
-### Install Lumina
-
-```bash
-# Clone the repository
-git clone https://github.com/irjudson/lumina.git
-cd lumina
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install the package
-pip install -e .
-
-# Or install with development dependencies
-pip install -e ".[dev]"
-```
-
-### Optional: GPU Acceleration Setup
-
-For GPU-accelerated perceptual hashing (20-30x faster):
-
-```bash
-# Install PyTorch with CUDA support (adjust CUDA version as needed)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-
-# Install FAISS for GPU similarity search
-pip install faiss-gpu
-```
-
-See **[GPU Setup Guide](./docs/guides/GPU_SETUP_GUIDE.md)** for detailed instructions.
+All services run together in one container for maximum simplicity.
 
 ---
 
-## Quick Start
+## Usage
 
-### 1. Analyze Your Photo Library
+### Web Interface (Recommended)
 
-Start by scanning your photo directories to build a catalog:
+Access http://localhost:8765 to:
+- Browse your entire photo library with metadata
+- Review duplicate groups with side-by-side comparison
+- Monitor real-time analysis progress
+- View statistics and storage insights
 
-```bash
-# Basic analysis
-vam-analyze /path/to/catalog -s /path/to/photos
+### Command Line (Advanced)
 
-# Recommended: Use all CPU cores with duplicate detection
-vam-analyze /path/to/catalog -s /path/to/photos --detect-duplicates -v
-
-# For large libraries: specify worker count
-vam-analyze /path/to/catalog -s /path/to/photos --workers 32 --detect-duplicates
-```
-
-**Performance:**
-- 32-core system: 20-30x speedup vs single-threaded
-- With GPU: 20-30x faster perceptual hashing
-- Real-time monitoring shows throughput, GPU utilization, and bottlenecks
-
-### 2. Browse Your Catalog
-
-Launch the web interface to explore your catalog:
+Run commands inside the container:
 
 ```bash
-# Start web server (opens at http://localhost:8765)
-lumina-web /path/to/catalog
+# Trigger manual analysis
+docker exec lumina lumina-analyze /catalog -s /photos --detect-duplicates
 
-# Custom port or allow external access
-lumina-web /path/to/catalog --port 8080 --host 0.0.0.0
+# Force complete re-scan
+docker exec lumina lumina-analyze /catalog -s /photos --clear
+
+# Organize into date-based structure
+docker exec lumina lumina-organize /catalog \
+  --output-dir /photos-organized \
+  --format "{year}/{month}"
 ```
-
-The web interface provides:
-- Browse all images and videos with metadata
-- View duplicate groups with side-by-side comparison
-- See date extraction results and confidence levels
-- Review statistics and storage analysis
-- **Real-time performance monitoring** - Live charts and dashboard
-
-### 3. Find and Review Duplicates
-
-```bash
-# Analyze with duplicate detection
-lumina-analyze /path/to/catalog -s /path/to/photos
-
-# Adjust similarity threshold (default: 5, lower = more strict)
-lumina-analyze /path/to/catalog -s /path/to/photos \
-  --detect-duplicates \
-  --similarity-threshold 3
-
-# Launch web UI to review duplicates
-lumina-web /path/to/catalog
-# Navigate to "View Duplicates" to see groups and recommended deletions
-```
-
-**Duplicate Detection:** Uses perceptual hashing (dHash, aHash, wHash) with quality scoring to identify duplicates and automatically select the best copy.
 
 ---
 
-## Common Workflows
+## Configuration
 
-### Incremental Updates
-
-Add new photos to an existing catalog without reprocessing:
+Edit `.env` file to customize:
 
 ```bash
-# Scan will skip files already in catalog
-lumina-analyze /path/to/catalog -s /path/to/photos
+# Required - Where to store catalog database
+CATALOG_PATH=/path/to/catalog
+
+# Required - Your photo library location
+PHOTOS_PATH=/path/to/photos
+
+# Optional - Performance tuning
+WORKERS=32                  # CPU cores for processing
+CELERY_WORKERS=4            # Background job workers
+ENABLE_GPU=true             # GPU acceleration
 ```
 
-### Manage Your Catalog
+**See [Configuration Guide](docs/deployment/CONFIGURATION.md) for all options.**
+
+---
+
+## GPU Acceleration
+
+GPU support is **built into the Docker image** - no manual setup needed!
+
+Just install nvidia-docker2:
 
 ```bash
-# Start fresh (clears existing catalog, creates backup first)
-lumina-analyze /path/to/catalog -s /path/to/photos --clear
+# Ubuntu/Debian
+sudo apt-get install nvidia-docker2
+sudo systemctl restart docker
 
-# Repair corrupted catalog
-lumina-analyze /path/to/catalog --repair
-
-# Verbose logging for troubleshooting
-lumina-analyze /path/to/catalog -s /path/to/photos -v
+# Verify GPU access
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 ```
 
-For detailed workflows, see the **[User Guide](./docs/guides/USER_GUIDE.md)**.
+Then `docker compose up` - GPU acceleration is automatic (20-30x faster).
+
+**See [GPU Setup Guide](docs/guides/GPU_SETUP.md) for troubleshooting.**
+
+---
+
+## Documentation
+
+📖 **[Quick Start](docs/guides/QUICK_START.md)** - Get running in 5 minutes
+📚 **[User Guide](docs/guides/USER_GUIDE.md)** - Complete workflows and features
+🏗️ **[Architecture](docs/technical/ARCHITECTURE.md)** - System design and components
+🐳 **[Docker Deployment](docs/deployment/DOCKER.md)** - Production setup
+⚙️ **[Configuration](docs/deployment/CONFIGURATION.md)** - All environment variables
+🔧 **[Troubleshooting](docs/guides/TROUBLESHOOTING.md)** - Common issues and solutions
+👨‍💻 **[Development](docs/technical/DEVELOPMENT.md)** - Contributing and local setup
 
 ---
 
@@ -221,26 +167,50 @@ For detailed workflows, see the **[User Guide](./docs/guides/USER_GUIDE.md)**.
 
 ---
 
-## Contributing
+## Management
 
-We welcome contributions! Please see our **[Contributing Guide](./docs/guides/CONTRIBUTING.md)** for details on:
+### View Logs
+```bash
+docker compose logs -f
+```
 
-- Setting up your development environment
-- Running tests
-- Code style and quality standards
-- Submitting pull requests
+### Restart Lumina
+```bash
+docker compose restart
+```
 
-### Quick Contribution Setup
+### Stop Lumina
+```bash
+docker compose down
+```
+
+### Update Lumina
+```bash
+git pull origin main
+docker compose build
+docker compose up -d
+```
+
+---
+
+## Development
+
+For developers who want to contribute or run Lumina natively:
 
 ```bash
+# Clone repository
+git clone https://github.com/irjudson/lumina.git
+cd lumina
+
+# Create virtual environment
+python3.11 -m venv venv
+source venv/bin/activate
+
 # Install with development dependencies
 pip install -e ".[dev]"
 
-# Run tests (skips integration tests by default)
-pytest -n auto
-
-# Run integration tests (requires docker-compose services running)
-pytest -m integration
+# Run tests
+pytest
 
 # Run code quality checks
 black lumina/ tests/
@@ -249,11 +219,33 @@ flake8 lumina/ tests/
 mypy lumina/
 ```
 
+**See [Development Guide](docs/technical/DEVELOPMENT.md) for complete instructions.**
+
+---
+
+## Contributing
+
+We welcome contributions! Please see our **[Contributing Guide](docs/guides/CONTRIBUTING.md)** for:
+
+- Setting up your development environment
+- Running tests
+- Code style and quality standards
+- Submitting pull requests
+
+### Quick Contribution Checklist
+
+- [ ] All tests pass (`pytest`)
+- [ ] Code formatted (`black`, `isort`)
+- [ ] No linting errors (`flake8`)
+- [ ] Type checking passes (`mypy`)
+- [ ] Documentation updated
+- [ ] Conventional commit messages
+
 ---
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](./LICENSE) file for details.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ---
 
@@ -261,15 +253,18 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](./LICE
 
 Lumina builds on excellent open-source projects:
 
-- [Pillow](https://python-pillow.org/) for image processing
-- [ExifTool](https://exiftool.org/) for metadata extraction
-- [Click](https://click.palletsprojects.com/) for CLI framework
-- [Rich](https://rich.readthedocs.io/) for beautiful terminal output
-- [FastAPI](https://fastapi.tiangolo.com/) for web interface
-- [Pydantic](https://docs.pydantic.dev/) for data validation
-- [PyTorch](https://pytorch.org/) for GPU acceleration
-- [FAISS](https://github.com/facebookresearch/faiss) for similarity search
-- [Vue.js](https://vuejs.org/) for frontend
+- [Pillow](https://python-pillow.org/) - Image processing
+- [ExifTool](https://exiftool.org/) - Metadata extraction
+- [Click](https://click.palletsprojects.com/) - CLI framework
+- [Rich](https://rich.readthedocs.io/) - Terminal output
+- [FastAPI](https://fastapi.tiangolo.com/) - Web API
+- [Pydantic](https://docs.pydantic.dev/) - Data validation
+- [PyTorch](https://pytorch.org/) - GPU acceleration
+- [FAISS](https://github.com/facebookresearch/faiss) - Similarity search
+- [Vue.js](https://vuejs.org/) - Frontend
+- [PostgreSQL](https://www.postgresql.org/) - Database
+- [Redis](https://redis.io/) - Message broker
+- [Celery](https://docs.celeryproject.org/) - Task queue
 
 ---
 
@@ -281,15 +276,17 @@ Lumina builds on excellent open-source projects:
 
 ## Project Links
 
-- **Repository**: https://github.com/irjudson/lumina
-- **Issues**: https://github.com/irjudson/lumina/issues
-- **Discussions**: https://github.com/irjudson/lumina/discussions
-- **Documentation**: [./docs](./docs)
+- 🏠 **Repository**: https://github.com/irjudson/lumina
+- 🐛 **Issues**: https://github.com/irjudson/lumina/issues
+- 💬 **Discussions**: https://github.com/irjudson/lumina/discussions
+- 📖 **Documentation**: [./docs](./docs)
 
 ---
 
 ## Development Story
 
-This project was developed using human-AI pair programming with Claude. The collaboration followed established engineering principles to ensure code quality without requiring exhaustive human review. Read more about the **[Development Approach](./docs/technical/DEVELOPMENT_APPROACH.md)**.
+This project was developed using human-AI pair programming with Claude. The collaboration followed established engineering principles to ensure code quality without requiring exhaustive human review.
 
-**Result**: Production-ready tool with continuous improvements, 616 passing tests and 79% coverage.
+**Result**: Production-ready tool with continuous improvements, **642 passing tests** and **79% coverage**.
+
+Read more about the **[Development Approach](docs/technical/DEVELOPMENT_APPROACH.md)**.
