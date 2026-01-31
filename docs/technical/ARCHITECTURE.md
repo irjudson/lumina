@@ -1,396 +1,538 @@
-# Lumina - System Architecture
+# Lumina Architecture
+
+Modern photo library management system with GPU-accelerated analysis and intelligent duplicate detection.
 
 ## Overview
 
-Lumina is a comprehensive photo catalog management system designed to organize 100,000+ images with:
-- Zero data loss guarantee
-- Chronological organization
-- Intelligent duplicate handling
-- Conflict resolution with human oversight
-- Plan-verify-execute workflow
+Lumina is designed for managing large photo libraries (100k+ images) with:
+- **Zero data loss** - All operations are safe and reversible
+- **High performance** - Multi-core CPU + optional GPU acceleration
+- **Intelligent analysis** - Metadata extraction, duplicate detection, quality scoring
+- **Simple deployment** - Single Docker container with all services included
 
-## Core Principles
+---
 
-1. **Never lose images** - All operations reversible until final execution
-2. **Organize chronologically** - YYYY-MM directory structure
-3. **One correct copy** - Identify and eliminate duplicates, keeping the best version
-4. **Human in the loop** - Flag conflicts for review, auto-handle clear cases
-5. **Foundation first** - Core organization before advanced curation features
+## Deployment Architecture
 
-## System Components
+### Single-Container Design
+
+All services run in one Docker container for maximum simplicity:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Lumina                               │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │   Analysis   │→ │    Review    │→ │   Verify     │     │
-│  │    Engine    │  │   Web UI     │  │   & Execute  │     │
-│  └──────────────┘  └──────────────┘  └──────────────┘     │
-│         ↓                 ↓                  ↓              │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │            Catalog Database (SQLite)          │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                   Lumina Container                      │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │  PostgreSQL  │  │    Redis     │  │   Celery     │ │
+│  │   Database   │  │    Broker    │  │   Workers    │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘ │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │   FastAPI    │  │   Vue.js     │  │     GPU      │ │
+│  │   Web API    │  │   Frontend   │  │  (optional)  │ │
+│  └──────────────┘  └──────────────┘  └──────────────┘ │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+           │                    │
+           ↓                    ↓
+    [Catalog Data]      [Photo Library]
+    (PostgreSQL)         (Read-only)
 ```
 
-### Analysis Engine
-**Module**: `lumina/analysis/`
+### Component Responsibilities
 
-Responsible for scanning source directories and extracting comprehensive metadata.
+**PostgreSQL**
+- Catalog metadata (images, duplicates, dates, quality scores)
+- Celery task results (for chord operations)
+- ACID transactions for data integrity
+- Efficient indexing for large datasets
 
-Components:
-- **Scanner** (`scanner.py`): Multi-core parallel file processing
-- **Metadata Extractor** (`metadata.py`): EXIF data extraction via ExifTool
-- **Duplicate Detector** (`duplicate_detector.py`): Perceptual hashing (dHash + aHash)
-- **Perceptual Hash** (`perceptual_hash.py`): Hash algorithm implementations
-- **Quality Scorer** (`quality_scorer.py`): Image quality assessment for duplicate selection
+**Redis**
+- Celery message broker
+- Task queue management
+- Real-time job progress tracking
+- Fast in-memory operations
 
-### Catalog Database
-**Module**: `vam_tools/core/database.py`
+**Celery**
+- Background job processing
+- Parallel task execution
+- Duplicate detection coordination
+- Thumbnail generation
+- Catalog organization
 
-Central data store with ACID properties, implemented using SQLite.
+**FastAPI**
+- REST API for catalog operations
+- Image serving and metadata queries
+- Job submission and monitoring
+- Real-time SSE progress streams
 
-Components:
-- **Database Manager** (`database.py`): Handles SQLite connections, migrations, and transactions.
-- **Type Definitions** (`types.py`): Pydantic models for type safety and data validation.
-- **Schema Definition** (`schema.sql`): Defines the database schema.
+**Vue.js Frontend**
+- Modern SPA interface
+- Catalog browsing and filtering
+- Duplicate comparison
+- Real-time performance monitoring
 
-Features:
-- SQLite-based storage for scalability and performance.
-- Transactional operations for data integrity.
-- Versioned migrations for schema evolution.
-- Efficient querying and indexing for large datasets.
+**GPU (Optional)**
+- NVIDIA CUDA for perceptual hashing
+- 20-30x faster image processing
+- NVIDIA MPS for multi-process sharing
+- FAISS for similarity search
 
-### Web Interface
-**Module**: `lumina/web/`
+---
 
-FastAPI-based REST API with Vue.js frontend.
+## Software Stack
 
-Components:
-- **API Server** (`api.py`, `catalogs_api.py`, `jobs_api.py`): REST endpoints for catalog browsing, duplicate review, and job management.
-- **Static Files**: Vue 3 SPAs for catalog viewing and duplicate comparison
+### Core Technologies
 
-Endpoints:
-- `/api/catalog/info` - Catalog metadata and statistics
-- `/api/images` - List images with pagination, filtering, sorting
-- `/api/images/{id}` - Get image details
-- `/api/images/{id}/file` - Serve image files
-- `/api/duplicates/stats` - Duplicate statistics
-- `/api/duplicates/groups` - List duplicate groups
-- `/api/duplicates/groups/{id}` - Get duplicate group details
-- `/api/statistics/summary` - Catalog statistics breakdown
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Language | Python 3.11+ | Application logic |
+| Database | PostgreSQL 14+ | Catalog storage |
+| Broker | Redis 7+ | Task queue |
+| Task Queue | Celery 5+ | Background jobs |
+| Web API | FastAPI | REST endpoints |
+| Frontend | Vue.js 3 | User interface |
+| GPU | PyTorch + CUDA 12.4 | Acceleration |
+| Metadata | ExifTool | EXIF/XMP extraction |
 
-### CLI
-**Module**: `lumina/cli/`
+### Python Dependencies
 
-Command-line interfaces built with Click.
+**Core**:
+- `pydantic` v2 - Type-safe data models
+- `sqlalchemy` - Database ORM
+- `pillow` - Image processing
+- `pillow-heif` - HEIC/HEIF support
 
-Commands:
-- `lumina-analyze` - Scan directories and build catalog
-- `lumina-web` - Launch web UI server
-- `lumina-organize` - Organize files based on catalog analysis
-- `lumina-generate-thumbnails` - Generate thumbnails for images in the catalog
+**Web**:
+- `fastapi` - Async web framework
+- `uvicorn` - ASGI server
+- `sse-starlette` - Server-sent events
+
+**CLI**:
+- `click` - Command-line framework
+- `rich` - Terminal formatting
+
+**Testing**:
+- `pytest` - Test framework
+- `pytest-xdist` - Parallel test execution
+- 642 tests, 79% coverage
+
+---
+
+## Application Architecture
+
+### Module Structure
+
+```
+lumina/
+├── core/              # Catalog and analysis engine
+│   ├── catalog.py     # Catalog management
+│   ├── analyzer.py    # Photo analysis pipeline
+│   └── organizer.py   # File organization
+│
+├── db/                # Database layer
+│   ├── connection.py  # PostgreSQL connection
+│   ├── schema.sql     # Database schema
+│   └── config.py      # Database configuration
+│
+├── jobs/              # Celery background tasks
+│   ├── tasks.py       # Job definitions
+│   ├── parallel_duplicates.py  # Duplicate detection
+│   └── progress_publisher.py   # Job progress tracking
+│
+├── api/               # FastAPI routes
+│   └── routers/
+│       ├── catalogs.py    # Catalog endpoints
+│       └── images.py      # Image serving
+│
+├── web/               # Web server
+│   ├── main.py        # FastAPI application
+│   └── jobs_api.py    # Job management endpoints
+│
+├── cli/               # Command-line interface
+│   ├── analyze.py     # lumina-analyze
+│   ├── web.py         # lumina-web
+│   └── organize.py    # lumina-organize
+│
+└── shared/            # Shared utilities
+    ├── metadata.py    # Metadata extraction
+    ├── perceptual_hash.py  # Image hashing
+    └── quality_scorer.py   # Quality assessment
+```
+
+---
 
 ## Data Model
 
-### Catalog Structure
+### Core Entities
 
-```json
-{
-  "version": "2.0.0",
-  "catalog_id": "uuid-1234-5678",
-  "created": "2025-10-26T00:00:00Z",
-  "last_updated": "2025-10-26T08:00:00Z",
+**Images**
+- `id` (UUID) - Unique identifier
+- `catalog_id` - Parent catalog
+- `source_path` - Original file location
+- `checksum` (SHA-256) - For exact duplicate detection
+- `file_type` - image/video
+- `metadata` (JSONB) - EXIF, XMP, format, resolution
+- `dates` (JSONB) - Extracted dates with confidence levels
+- `quality_score` (0-100) - Multi-factor quality assessment
+- `status` - active/archived/flagged/rejected/selected
 
-  "configuration": {
-    "source_directories": ["/path/to/photos"],
-    "similarity_threshold": 5,
-    "checkpoint_interval_seconds": 300
-  },
+**Duplicate Groups**
+- `id` (UUID) - Group identifier
+- `catalog_id` - Parent catalog
+- `primary_hash` - Representative hash
+- `similarity_threshold` - Detection threshold used
+- Individual member links via junction table
 
-  "state": {
-    "phase": "analyzing|complete",
-    "last_checkpoint": "2025-10-26T07:55:00Z",
-    "images_processed": 45230,
-    "images_total": 50000,
-    "progress_percentage": 90.46
-  },
+**Perceptual Hashes**
+- `image_id` - Foreign key to images
+- `dhash` - Difference hash (64-bit)
+- `ahash` - Average hash (64-bit)
+- `whash` - Wavelet hash (64-bit)
+- Used for similarity detection (Hamming distance)
 
-  "statistics": {
-    "total_images": 45000,
-    "total_videos": 5000,
-    "total_size_bytes": 500000000000,
-    "no_date": 500,
-    "suspicious_dates": 50
-  },
+**Jobs**
+- `id` (UUID) - Job identifier
+- `job_type` - analyze/organize/duplicates/thumbnails
+- `status` - PENDING/PROGRESS/SUCCESS/FAILURE
+- `parameters` (JSONB) - Job configuration
+- `progress` (JSONB) - Current/total/percent
+- Real-time updates via PostgreSQL NOTIFY
 
-  "images": {
-    "sha256:abc123...": {
-      "id": "sha256:abc123...",
-      "source_path": "/photos/IMG_1234.jpg",
-      "file_type": "image",
-      "checksum": "sha256:abc123...",
-
-      "dates": {
-        "exif_date": "2023-06-15T14:30:00Z",
-        "filename_date": null,
-        "directory_date": "2023-06",
-        "filesystem_date": "2023-06-20T10:00:00Z",
-        "selected_date": "2023-06-15T14:30:00Z",
-        "source": "exif",
-        "confidence": 95
-      },
-
-      "metadata": {
-        "format": "JPEG",
-        "resolution": [4032, 3024],
-        "width": 4032,
-        "height": 3024,
-        "size_bytes": 3145728,
-        "exif": {
-          "Make": "Apple",
-          "Model": "iPhone 12 Pro",
-          "DateTimeOriginal": "2023:06:15 14:30:00"
-        }
-      },
-
-      "hashes": {
-        "dhash": "abcd1234ef567890",
-        "ahash": "1234567890abcdef"
-      },
-
-      "quality_score": 85,
-      "status": "complete"
-    }
-  },
-
-  "duplicate_groups": [
-    {
-      "id": "dup-group-001",
-      "primary_image_id": "sha256:abc123...",
-      "duplicate_image_ids": ["sha256:def456...", "sha256:ghi789..."],
-      "similarity_type": "perceptual",
-      "confidence": 95
-    }
-  ],
-
-  "review_queue": [
-    {
-      "id": "review-001",
-      "type": "date_conflict|duplicate|no_date",
-      "priority": "high|medium|low",
-      "image_ids": ["sha256:abc123..."],
-      "details": {},
-      "status": "pending|resolved"
-    }
-  ]
-}
-```
-
-### Image Record
-
-**Type**: `ImageRecord` (Pydantic model)
-
-Fields:
-- `id`: Checksum (SHA-256) - unique identifier
-- `source_path`: Original file location
-- `file_type`: `image` or `video`
-- `checksum`: SHA-256 hash for duplicate detection
-- `dates`: `DateInfo` - extracted dates with confidence
-- `metadata`: `ImageMetadata` - comprehensive metadata
-- `hashes`: Optional perceptual hashes (dHash, aHash)
-- `quality_score`: 0-100 quality assessment
-- `status`: Processing status
-
-### Date Information
-
-**Type**: `DateInfo` (Pydantic model)
-
-Date extraction sources (priority order):
-1. **EXIF metadata** (95% confidence) - Camera timestamps
-2. **Filename patterns** (70% confidence) - YYYY-MM-DD, YYYYMMDD, etc.
-3. **Directory structure** (50% confidence) - Year/month from folder names
-4. **Filesystem metadata** (30% confidence) - File creation/modification time
-
-System selects the **earliest date** from all available sources.
-
-### Duplicate Groups
-
-**Type**: `DuplicateGroup` (Pydantic model)
-
-Fields:
-- `id`: Unique group identifier
-- `primary_image_id`: Best quality image (selected automatically)
-- `duplicate_image_ids`: List of duplicate images
-- `similarity_type`: `exact` (checksum) or `perceptual` (hash)
-- `confidence`: Similarity confidence (0-100)
+---
 
 ## Processing Pipeline
 
 ### 1. Analysis Phase
 
 ```
-┌─────────────┐
-│   Scanner   │
-└──────┬──────┘
-       │
-       ├──→ Collect files (recursive directory scan)
-       │    └─→ Filter by extension (images/videos only)
-       │
-       ├──→ Parallel processing (multiprocessing pool)
-       │    ├─→ Compute checksum (SHA-256)
-       │    ├─→ Extract EXIF metadata (ExifTool)
-       │    ├─→ Extract dates (multiple sources)
-       │    ├─→ Generate perceptual hashes (if enabled)
-       │    └─→ Score quality
-       │
-       ├──→ Add to catalog
-       │    ├─→ Check for duplicates (by checksum)
-       │    ├─→ Update statistics
-       │    └─→ Create checkpoint (every 100 files)
-       │
-       └──→ Final checkpoint
-            └─→ Save catalog
+User Input
+    │
+    ↓
+┌────────────────────┐
+│ lumina-analyze CLI │
+└────────┬───────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Multi-Core File Discovery         │
+│   - Parallel directory traversal    │
+│   - Extension filtering             │
+│   - Incremental (skip existing)     │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Parallel Metadata Extraction      │
+│   - ExifTool for EXIF/XMP           │
+│   - Date extraction (multi-source)  │
+│   - Checksum (SHA-256)              │
+│   - Corruption detection            │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   GPU-Accelerated Hashing           │
+│   (if --detect-duplicates)          │
+│   - Perceptual hashing (dHash...)   │
+│   - Quality scoring                 │
+│   - 20-30x faster with GPU          │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   PostgreSQL Storage                │
+│   - Batch inserts                   │
+│   - Transaction safety              │
+│   - Index updates                   │
+└─────────────────────────────────────┘
 ```
 
 ### 2. Duplicate Detection Phase
 
 ```
-┌────────────────────┐
-│ Duplicate Detector │
-└─────────┬──────────┘
-          │
-          ├──→ Build hash index
-          │    ├─→ Group by dHash
-          │    └─→ Group by aHash
-          │
-          ├──→ Find similar images
-          │    ├─→ Hamming distance comparison
-          │    └─→ Filter by threshold (default: 5)
-          │
-          ├──→ Score and rank
-          │    ├─→ Quality score (format, resolution, size)
-          │    ├─→ Metadata completeness
-          │    └─→ Select primary image
-          │
-          └──→ Create duplicate groups
-               └─→ Save to catalog
+Trigger: User request or post-analysis
+    │
+    ↓
+┌─────────────────────────────────────┐
+│   Celery Job Submission             │
+│   - Create job record               │
+│   - Queue background task           │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Build Hash Index (in-memory)      │
+│   - Load all perceptual hashes      │
+│   - Group by hash similarity        │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Parallel Hamming Distance         │
+│   - Compare hash pairs              │
+│   - Threshold filtering (default 5) │
+│   - Union-find grouping             │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Quality-Based Selection           │
+│   - Score each image                │
+│   - Select best from each group     │
+│   - Create duplicate groups         │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   PostgreSQL Storage                │
+│   - Save duplicate groups           │
+│   - Update image statuses           │
+│   - Publish completion              │
+└─────────────────────────────────────┘
 ```
 
-### 3. Review Phase
+### 3. Organization Phase
 
 ```
-┌─────────────┐
-│   Web UI    │
-└──────┬──────┘
-       │
-       ├──→ Browse catalog
-       │    ├─→ View all images
-       │    ├─→ Filter/sort
-       │    └─→ View metadata
-       │
-       ├──→ Review duplicates
-       │    ├─→ View duplicate groups
-       │    ├─→ Side-by-side comparison
-       │    ├─→ View recommendations
-       │    └─→ Mark for action
-       │
-       └──→ Resolve conflicts
-            ├─→ Date conflicts
-            ├─→ No date images
-            └─→ Manual overrides
+User specifies output directory
+    │
+    ↓
+┌─────────────────────────────────────┐
+│   Generate Organization Plan        │
+│   - Date-based directory structure  │
+│   - Conflict detection              │
+│   - Dry-run preview                 │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   User Review (if conflicts)        │
+│   - Show proposed structure         │
+│   - Highlight conflicts             │
+│   - Request confirmation            │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Execute Operations                │
+│   - Copy or move files              │
+│   - Preserve metadata               │
+│   - Verify checksums                │
+└────────┬────────────────────────────┘
+         │
+         ↓
+┌─────────────────────────────────────┐
+│   Update Catalog                    │
+│   - New file paths                  │
+│   - Status updates                  │
+│   - Transaction commit              │
+└─────────────────────────────────────┘
 ```
+
+---
 
 ## Performance Characteristics
 
 ### Multi-Core Scaling
-- Linear scaling up to CPU core count
-- 20-30x speedup on 32-core systems
-- Chunk size: `len(files) // (workers * 4)`
-- Default workers: `multiprocessing.cpu_count()`
 
-### Memory Usage
-- Catalog loaded entirely in memory
+**CPU Processing**:
+- Linear scaling up to core count
+- Default: Use all available cores
+- Configurable via `WORKERS` environment variable
+- Typical: 20-30x speedup on 32-core system
+
+**Memory Usage**:
 - ~500 bytes per image record
-- 100k images ≈ 50 MB RAM
+- 100k images ≈ 50 MB catalog memory
 - Perceptual hashes add ~32 bytes per image
+- PostgreSQL connection pool: ~10 MB
 
-### Disk I/O
-- Sequential reads for file scanning
-- Random reads for checksum computation
-- Checkpoint writes every 100 files (atomic JSON write)
-- Single final catalog write
+**Disk I/O**:
+- Sequential reads during file discovery
+- Random reads for metadata extraction
+- Batch writes to PostgreSQL
+- Recommend SSD for catalog database
 
-### Checkpointing
-- Auto-checkpoint: Every 100 files processed
-- Manual checkpoint: `catalog.checkpoint(force=True)`
-- Lock timeout: 30 seconds default
-- Recovery: Load from last checkpoint
+### GPU Acceleration
 
-## Technology Stack
+**With NVIDIA GPU**:
+- 20-30x faster perceptual hashing
+- Batch processing for efficiency
+- NVIDIA MPS for multi-process sharing
+- CUDA 12.4 with PyTorch
 
-### Core Dependencies
-- **Python 3.9+**: Core language
-- **Pydantic v2**: Type-safe data models
-- **ExifTool**: Comprehensive metadata extraction
-- **Pillow**: Image processing
-- **pillow-heif**: HEIC/HEIF support
+**Requirements**:
+- NVIDIA GPU with 8GB+ VRAM
+- CUDA compute capability 7.0+
+- nvidia-docker2 for Docker deployment
 
-### CLI & Output
-- **Click**: Command-line interface framework
-- **Rich**: Beautiful terminal formatting
+---
 
-### Web Stack
-- **FastAPI**: Modern async web framework
-- **Uvicorn**: ASGI server
-- **Vue.js 3**: Frontend framework (CDN-based)
-- **Axios**: HTTP client
+## Real-Time Features
 
-### Development
-- **pytest**: Testing framework (213 tests, 84% coverage)
-- **Black**: Code formatting
-- **isort**: Import sorting
-- **flake8**: Linting
-- **mypy**: Type checking
+### Job Progress Tracking
 
-## Security Considerations
+**PostgreSQL LISTEN/NOTIFY**:
+- Real-time progress updates
+- No polling required
+- Efficient pub/sub pattern
+
+**Server-Sent Events (SSE)**:
+- Live progress streaming to web UI
+- Automatic reconnection
+- Progress percentage, throughput, ETA
+
+**In-Memory Fallback**:
+- Works without PostgreSQL NOTIFY
+- Polling-based updates
+- 1-second refresh interval
+
+### Performance Monitoring
+
+**Metrics Collected**:
+- Images processed per second
+- GPU utilization percentage
+- Database query performance
+- Celery queue depth
+- Memory usage trends
+
+**Dashboard**:
+- Real-time charts
+- Historical trends
+- Bottleneck identification
+- Resource allocation recommendations
+
+---
+
+## Security & Safety
 
 ### File System Safety
-- File locking (fcntl.flock) prevents concurrent writes
-- Signal-based timeout prevents deadlocks
-- Checksum verification after operations
-- No modification of source files during analysis
+
+**Read-Only Photo Library**:
+- Source photos mounted read-only
+- No modifications to originals
+- Copy/move operations are explicit
+
+**Catalog Integrity**:
+- PostgreSQL ACID transactions
+- Checksum verification
+- Corruption detection
+- Automatic recovery
 
 ### Input Validation
-- Pydantic models validate all data
-- Path traversal prevention
-- Extension whitelist for file types
-- Size limits for uploads (if implemented)
 
-### Web API
+**Pydantic Models**:
+- Type-safe data validation
+- Automatic serialization
+- Schema enforcement
+
+**Path Safety**:
+- Path traversal prevention
+- Extension whitelist
+- Symbolic link handling
+
+### Network Security
+
+**Web API**:
 - CORS disabled by default (localhost only)
 - No authentication (designed for local use)
-- Read-only operations (no file deletion via API)
-- Static file serving from known directories only
+- Read-only image serving
+- Rate limiting on expensive operations
 
-## Future Architectural Considerations
+**Docker Deployment**:
+- Internal PostgreSQL (no external access)
+- Internal Redis (no external access)
+- Configurable web port binding
 
-### Scalability
-- Consider SQLite for >500k images
-- Implement lazy loading for catalog sections
-- Add image thumbnail cache
-- Stream large responses
+---
 
-### Distributed Processing
-- Support remote workers
-- Distributed hash table for deduplication
+## Scalability Considerations
+
+### Current Limits
+
+- **Tested**: 1M+ images
+- **Database**: PostgreSQL handles billions of rows
+- **Memory**: Catalog loaded on-demand, not fully in memory
+- **Disk**: Scales with photo library size
+
+### Performance Tuning
+
+**Small Libraries** (<10k images):
+- 4-8 CPU workers
+- 2-4 Celery workers
+- GPU optional
+
+**Medium Libraries** (10k-100k):
+- 16-32 CPU workers
+- 4-8 Celery workers
+- GPU recommended
+
+**Large Libraries** (100k+):
+- 32-64 CPU workers
+- 8-16 Celery workers
+- GPU strongly recommended
+- SSD for catalog database
+
+---
+
+## Future Architecture
+
+### Potential Enhancements
+
+**Distributed Processing**:
+- Remote worker support
 - Cloud storage integration
+- Distributed duplicate detection
 
-### Extensibility
-- Plugin system for custom analyzers
-- External AI model integration
-- Custom organization rules
-- Export to other catalog formats
+**Advanced Features**:
+- AI-powered image tagging
+- Face recognition
+- Scene detection
+- Smart collections
+
+**Scalability**:
+- Lazy loading for massive catalogs
+- Distributed hash tables
+- Caching layers (Redis)
+- Read replicas for PostgreSQL
+
+---
+
+## Development
+
+### Running Locally
+
+See **[Development Guide](./DEVELOPMENT.md)** for:
+- Native Python setup
+- Database configuration
+- Running tests
+- Code quality checks
+
+### Testing
+
+**Test Coverage**: 642 tests, 79% coverage
+
+**Test Categories**:
+- Unit tests (fast, no external dependencies)
+- Integration tests (PostgreSQL required)
+- API tests (FastAPI endpoints)
+- CLI tests (command-line interface)
+
+### Contributing
+
+See **[Contributing Guide](../guides/CONTRIBUTING.md)** for:
+- Development workflow
+- Code style standards
+- Pull request process
+- Architecture decisions
+
+---
+
+## References
+
+- **[Quick Start](../guides/QUICK_START.md)** - Get running in 5 minutes
+- **[Docker Deployment](../deployment/DOCKER.md)** - Production setup
+- **[Configuration](../deployment/CONFIGURATION.md)** - All options
+- **[Development](./DEVELOPMENT.md)** - Developer setup
