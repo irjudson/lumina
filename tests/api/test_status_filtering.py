@@ -135,7 +135,7 @@ class TestBurstsStatusFiltering:
     """Tests for GET /api/catalogs/{catalog_id}/bursts status filtering.
 
     This endpoint already has show_rejected parameter implemented.
-    See vam_tools/api/routers/catalogs.py lines 2441-2492.
+    See lumina/api/routers/catalogs.py lines 2441-2492.
     """
 
     @pytest.mark.skip(reason="TODO: Implement actual test with fixture data")

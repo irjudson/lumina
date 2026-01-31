@@ -47,9 +47,9 @@ except ImportError:
 app = FastAPI(title="Lumina Catalog Viewer", version="2.0.0")
 
 # Configure CORS - restricted to localhost by default for security
-# Set VAM_CORS_ORIGINS environment variable to customize (comma-separated)
+# Set LUMINA_CORS_ORIGINS environment variable to customize (comma-separated)
 cors_origins_str = os.getenv(
-    "VAM_CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000"
+    "LUMINA_CORS_ORIGINS", "http://localhost:8000,http://127.0.0.1:8000"
 )
 cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
 

@@ -108,20 +108,20 @@ def organize(
     \b
     Examples:
         # DRY RUN (preview changes - always do this first!)
-        vam-organize /path/to/catalog /path/to/organized --dry-run
+        lumina-organize /path/to/catalog /path/to/organized --dry-run
 
         # Copy files to organized structure (safe, keeps originals)
-        vam-organize /path/to/catalog /path/to/organized --operation copy
+        lumina-organize /path/to/catalog /path/to/organized --operation copy
 
         # Move files (deletes originals - be careful!)
-        vam-organize /path/to/catalog /path/to/organized --operation move
+        lumina-organize /path/to/catalog /path/to/organized --operation move
 
         # Custom directory structure
-        vam-organize /path/to/catalog /path/to/organized \\
+        lumina-organize /path/to/catalog /path/to/organized \\
             --structure YYYY/MM --naming date_time_original
 
         # Rollback a transaction
-        vam-organize /path/to/catalog /path/to/organized \\
+        lumina-organize /path/to/catalog /path/to/organized \\
             --rollback abc123...
 
     \b
@@ -251,7 +251,7 @@ def organize(
                 console.print(f"\n[dim]Transaction ID: {result.transaction_id}[/dim]")
                 console.print("[dim]You can rollback this operation with:[/dim]")
                 console.print(
-                    f"[dim]  vam-organize {catalog_path} {output_directory} "
+                    f"[dim]  lumina-organize {catalog_path} {output_directory} "
                     f"--rollback {result.transaction_id}[/dim]"
                 )
 

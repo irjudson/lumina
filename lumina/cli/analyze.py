@@ -120,7 +120,7 @@ def setup_logging(verbose: bool = False) -> None:
 @click.option(
     "--no-thumbnails",
     is_flag=True,
-    help="Skip thumbnail generation during analysis (can generate later with vam-generate-thumbnails)",
+    help="Skip thumbnail generation during analysis (can generate later with lumina-generate-thumbnails)",
 )
 @click.option(
     "--extract-previews",
@@ -641,7 +641,7 @@ def analyze(
                     for category, count in categories.most_common():
                         console.print(f"  • {category}: {count:,}")
                     console.print(
-                        "[dim]View these files with: vam-web /path/to/catalog (Problematic Files tab)[/dim]"
+                        "[dim]View these files with: lumina-web /path/to/catalog (Problematic Files tab)[/dim]"
                     )
 
                 console.print()
@@ -694,7 +694,7 @@ def analyze(
         console.print(
             "\n[yellow]The catalog may be corrupted. Try running with --repair to fix it:[/yellow]"
         )
-        console.print(f"  [cyan]vam-analyze {catalog_path} --repair[/cyan]")
+        console.print(f"  [cyan]lumina-analyze {catalog_path} --repair[/cyan]")
         console.print(
             "\n[yellow]Or use --clear to start fresh (existing data will be backed up):[/yellow]"
         )
@@ -705,11 +705,11 @@ def analyze(
         )
         if source_dirs:
             console.print(
-                f"  [cyan]vam-analyze {catalog_path} -s {source_args} --clear[/cyan]"
+                f"  [cyan]lumina-analyze {catalog_path} -s {source_args} --clear[/cyan]"
             )
         else:
             console.print(
-                f"  [cyan]vam-analyze {catalog_path} -s [your source directories] --clear[/cyan]"
+                f"  [cyan]lumina-analyze {catalog_path} -s [your source directories] --clear[/cyan]"
             )
         if verbose:
             console.print("\n[dim]Full error details:[/dim]")

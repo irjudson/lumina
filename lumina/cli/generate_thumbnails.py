@@ -76,13 +76,13 @@ def generate(
 
     Examples:
         # Generate thumbnails for all images
-        vam-generate-thumbnails /path/to/catalog
+        lumina-generate-thumbnails /path/to/catalog
 
         # Regenerate all thumbnails at 300x300 pixels
-        vam-generate-thumbnails /path/to/catalog --force --size 300
+        lumina-generate-thumbnails /path/to/catalog --force --size 300
 
         # Generate with lower quality for faster processing
-        vam-generate-thumbnails /path/to/catalog --quality 70
+        lumina-generate-thumbnails /path/to/catalog --quality 70
     """
     # Setup logging
     log_level = logging.DEBUG if verbose else logging.INFO

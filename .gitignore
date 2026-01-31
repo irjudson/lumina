@@ -87,7 +87,15 @@ lumina-pgdata/
 # Temporary analysis files
 analyze_group.py
 test_pixel_threshold.py
+compute_*.py
+manual_*.py
+monitor_*.sh
+*.sql
 
 # Session/warp files
 WARP.md
 SESSION_STATE.md
+
+# Test results
+test_results.txt
+*.output

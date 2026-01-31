@@ -18,7 +18,7 @@ test_db_name = f"lumina-test-{worker_id}"
 # Set environment variable BEFORE any lumina imports
 os.environ["POSTGRES_DB"] = test_db_name
 
-# Remove any already-imported vam_tools modules to force reload with test settings
+# Remove any already-imported lumina modules to force reload with test settings
 modules_to_remove = [name for name in sys.modules if name.startswith("lumina")]
 for module_name in modules_to_remove:
     del sys.modules[module_name]
