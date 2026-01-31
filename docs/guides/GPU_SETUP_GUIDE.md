@@ -30,7 +30,7 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 ```bash
 # Test GPU detection
-python vam_tools/core/gpu_utils.py
+python lumina/core/gpu_utils.py
 ```
 
 Expected output:
@@ -55,10 +55,10 @@ Recommended Configuration:
 
 ```bash
 # Run duplicate detection with GPU acceleration
-vam-analyze /path/to/catalog --detect-duplicates --hash-methods all --gpu
+lumina-analyze /path/to/catalog --detect-duplicates --hash-methods all --gpu
 
 # Or with specific GPU batch size
-vam-analyze /path/to/catalog --detect-duplicates --hash-methods all --gpu --gpu-batch-size 64
+lumina-analyze /path/to/catalog --detect-duplicates --hash-methods all --gpu --gpu-batch-size 64
 ```
 
 ## Performance Expectations

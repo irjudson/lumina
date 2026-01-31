@@ -63,7 +63,7 @@ which exiftool
 source venv/bin/activate
 
 # Scan a directory (start small)
-vam-analyze ~/my-catalog --source ~/Pictures/vacation-2023
+lumina-analyze ~/my-catalog --source ~/Pictures/vacation-2023
 
 # View results in web browser
 vam-web ~/my-catalog
@@ -73,12 +73,12 @@ Then open http://localhost:8765 in your browser.
 
 ## Command Reference
 
-### vam-analyze
+### lumina-analyze
 
 Build or update a photo catalog by scanning source directories.
 
 ```bash
-vam-analyze CATALOG_PATH --source SOURCE_DIR [OPTIONS]
+lumina-analyze CATALOG_PATH --source SOURCE_DIR [OPTIONS]
 ```
 
 **Arguments:**
@@ -95,22 +95,22 @@ vam-analyze CATALOG_PATH --source SOURCE_DIR [OPTIONS]
 
 ```bash
 # Simple scan
-vam-analyze /path/to/catalog --source /path/to/photos
+lumina-analyze /path/to/catalog --source /path/to/photos
 
 # Scan multiple directories
-vam-analyze /path/to/catalog \
+lumina-analyze /path/to/catalog \
   --source ~/Pictures \
   --source /mnt/external/photos \
   --source /mnt/backup/photos
 
 # With duplicate detection
-vam-analyze /path/to/catalog \
+lumina-analyze /path/to/catalog \
   --source ~/Pictures \
   --detect-duplicates \
   --similarity-threshold 3
 
 # Verbose with custom workers
-vam-analyze /path/to/catalog \
+lumina-analyze /path/to/catalog \
   --source ~/Pictures \
   --workers 16 \
   --verbose
@@ -140,12 +140,12 @@ Processing files... ━━━━━━━━━━━━━━━━━━━━
 └───────────────────────┴─────────────┘
 ```
 
-### vam-web
+### lumina-web
 
 Launch the web interface to browse and review your catalog.
 
 ```bash
-vam-web CATALOG_PATH [OPTIONS]
+lumina-web CATALOG_PATH [OPTIONS]
 ```
 
 **Arguments:**
@@ -160,16 +160,16 @@ vam-web CATALOG_PATH [OPTIONS]
 
 ```bash
 # Start server on default port
-vam-web /path/to/catalog
+lumina-web /path/to/catalog
 
 # Custom port
-vam-web /path/to/catalog --port 8080
+lumina-web /path/to/catalog --port 8080
 
 # Make accessible on network
-vam-web /path/to/catalog --host 0.0.0.0 --port 8765
+lumina-web /path/to/catalog --host 0.0.0.0 --port 8765
 
 # Development mode with auto-reload
-vam-web /path/to/catalog --reload
+lumina-web /path/to/catalog --reload
 ```
 
 Then open http://localhost:8765 in your browser.

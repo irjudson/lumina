@@ -2,7 +2,7 @@
 
 # Default target
 help:
-	@echo "VAM Tools - Makefile Commands"
+	@echo "Lumina - Makefile Commands"
 	@echo "=============================="
 	@echo ""
 	@echo "Setup:"
@@ -120,7 +120,7 @@ test-watch:
 # Coverage (separate from regular testing)
 coverage:
 	@echo "Running tests with coverage..."
-	@./venv/bin/pytest tests/ -n 4 --cov=vam_tools --cov-report=term-missing --cov-report=html
+	@./venv/bin/pytest tests/ -n 4 --cov=lumina --cov-report=term-missing --cov-report=html
 	@echo ""
 	@echo "Coverage report generated in htmlcov/index.html"
 
@@ -147,10 +147,10 @@ run:
 	@./run_local.sh
 
 run-web:
-	@./venv/bin/python -m uvicorn vam_tools.api.app:app --reload --host 0.0.0.0 --port 8765
+	@./venv/bin/python -m uvicorn lumina.api.app:app --reload --host 0.0.0.0 --port 8765
 
 run-celery:
-	@./venv/bin/celery -A vam_tools.celery_app worker --loglevel=info
+	@./venv/bin/celery -A lumina.celery_app worker --loglevel=info
 
 # Docker variant
 run-docker:
@@ -184,14 +184,14 @@ docker-clean:
 
 format:
 	@echo "Formatting code..."
-	@./venv/bin/black vam_tools/ tests/ --quiet
-	@./venv/bin/isort vam_tools/ tests/ --quiet
+	@./venv/bin/black lumina/ tests/ --quiet
+	@./venv/bin/isort lumina/ tests/ --quiet
 	@echo "Code formatted"
 
 lint:
 	@echo "Running linters..."
-	@./venv/bin/flake8 vam_tools/ tests/
-	@./venv/bin/mypy vam_tools/
+	@./venv/bin/flake8 lumina/ tests/
+	@./venv/bin/mypy lumina/
 	@echo "Linting complete"
 
 clean:
@@ -236,8 +236,8 @@ status:
 	@docker compose ps 2>/dev/null || echo "  (not running)"
 	@echo ""
 	@echo "Local Services:"
-	@pgrep -f "uvicorn.*vam_tools" > /dev/null && echo "  Web: RUNNING" || echo "  Web: STOPPED"
-	@pgrep -f "celery.*vam_tools" > /dev/null && echo "  Celery: RUNNING" || echo "  Celery: STOPPED"
+	@pgrep -f "uvicorn.*lumina" > /dev/null && echo "  Web: RUNNING" || echo "  Web: STOPPED"
+	@pgrep -f "celery.*lumina" > /dev/null && echo "  Celery: RUNNING" || echo "  Celery: STOPPED"
 
 logs-web:
 	@docker compose logs -f web

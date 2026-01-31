@@ -161,7 +161,7 @@ def analyze(
     if not repair and not source:
         console.print("[red]Error: --source/-s is required unless using --repair[/red]")
         console.print(
-            "Example: vam-analyze /path/to/catalog -s /path/to/photos -s /path/to/more/photos"
+            "Example: lumina-analyze /path/to/catalog -s /path/to/photos -s /path/to/more/photos"
         )
         sys.exit(1)
 

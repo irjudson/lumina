@@ -162,13 +162,18 @@ class TestJobStatusEndpoints:
 class TestJobListEndpoint:
     """Tests for job list endpoint."""
 
-    @patch("lumina.web.jobs_api.get_redis_client")
+    @patch("lumina.web.jobs_api.get_recent_jobs")
     @patch("lumina.web.jobs_api.AsyncResult")
-    def test_list_active_jobs(self, mock_async_result, mock_get_redis_client):
+    @patch("lumina.jobs.progress_publisher.get_last_progress")
+    def test_list_active_jobs(
+        self, mock_get_progress, mock_async_result, mock_get_recent
+    ):
         """Test GET /api/jobs lists active jobs."""
-        mock_redis = Mock()
-        mock_get_redis_client.return_value = mock_redis
-        mock_redis.lrange.return_value = ["job-1", "job-2"]
+        mock_get_recent.return_value = [
+            {"job_id": "job-1", "job_type": "analyze", "params": {}},
+            {"job_id": "job-2", "job_type": "organize", "params": {}},
+        ]
+        mock_get_progress.return_value = None
 
         mock_result_1 = Mock()
         mock_result_1.state = "PROGRESS"
@@ -234,13 +239,17 @@ class TestSSEProgressStream:
 class TestJobRerunEndpoint:
     """Tests for job rerun endpoint."""
 
-    @patch("lumina.web.jobs_api.get_redis_client")
+    @patch("lumina.web.jobs_api.get_job_params")
     @patch("lumina.web.jobs_api.analyze_catalog_task")
-    def test_rerun_analyze_job(self, mock_analyze_task, mock_get_redis_client):
+    def test_rerun_analyze_job(self, mock_analyze_task, mock_get_params):
         """Test POST /api/jobs/{job_id}/rerun for analyze job."""
-        mock_redis = Mock()
-        mock_get_redis_client.return_value = mock_redis
-        mock_redis.get.return_value = '{"job_id": "old-analyze-job", "type": "analyze_catalog", "params": {"catalog_path": "/app/test", "source_directories": ["/app/photos"]}}'
+        mock_get_params.return_value = {
+            "type": "analyze_catalog",
+            "params": {
+                "catalog_path": "/app/test",
+                "source_directories": ["/app/photos"],
+            },
+        }
 
         mock_result = Mock()
         mock_result.id = "new-analyze-job"
@@ -255,12 +264,10 @@ class TestJobRerunEndpoint:
             catalog_path="/app/test", source_directories=["/app/photos"]
         )
 
-    @patch("lumina.web.jobs_api.get_redis_client")
-    def test_rerun_job_not_found(self, mock_get_redis_client):
+    @patch("lumina.web.jobs_api.get_job_params")
+    def test_rerun_job_not_found(self, mock_get_params):
         """Test rerun job when original job parameters are not found."""
-        mock_redis = Mock()
-        mock_get_redis_client.return_value = mock_redis
-        mock_redis.get.return_value = None
+        mock_get_params.return_value = None
 
         response = client.post("/api/jobs/nonexistent-job/rerun")
 

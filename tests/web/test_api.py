@@ -100,6 +100,8 @@ class TestAPI:
 
     def test_get_catalog_not_initialized(self) -> None:
         """Test get_catalog raises when not initialized."""
+        from fastapi import HTTPException
+
         import lumina.web.api as api_module
 
         # Reset global state
@@ -109,8 +111,8 @@ class TestAPI:
         try:
             get_catalog()
             assert False, "Should have raised HTTPException"
-        except Exception as e:
-            assert "Catalog not initialized" in str(e)
+        except HTTPException as e:
+            assert "Catalog not initialized" in e.detail
 
     def test_init_catalog(self, tmp_path: Path) -> None:
         """Test catalog initialization."""

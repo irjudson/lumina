@@ -264,16 +264,16 @@ docker-compose up -d --scale celery-worker=4
 
 ---
 
-## GPU Support
+### GPU Support
 
 ### Verify GPU Access
 
 ```bash
 # Check GPU in web container
-docker exec vam-web nvidia-smi
+docker exec lumina-web nvidia-smi
 
 # Check GPU in worker container
-docker exec vam-celery-worker nvidia-smi
+docker exec lumina-cw nvidia-smi
 ```
 
 Expected output:

@@ -80,3 +80,14 @@ secrets/
 credentials/
 *.key
 *.pem
+# Docker volumes and data
+postgres_data/
+lumina-pgdata/
+
+# Temporary analysis files
+analyze_group.py
+test_pixel_threshold.py
+
+# Session/warp files
+WARP.md
+SESSION_STATE.md

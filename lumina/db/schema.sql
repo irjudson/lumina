@@ -284,6 +284,33 @@ CREATE INDEX IF NOT EXISTS idx_statistics_timestamp ON statistics(timestamp);
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS performance_snapshots (
     id SERIAL PRIMARY KEY,
+    snapshot_name VARCHAR(255) NOT NULL,
+    cpu_usage JSONB DEFAULT '[]',
+    memory_usage JSONB DEFAULT '[]',
+    disk_io JSONB DEFAULT '[]',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_snapshots_created_at ON performance_snapshots(created_at);
+
+-- ============================================================================
+-- JOB_PROGRESS TABLE (real-time job progress tracking)
+-- ============================================================================
+-- JOB_PROGRESS TABLE (real-time job progress tracking)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS job_progress (
+    job_id TEXT PRIMARY KEY,                -- Celery task ID
+    progress_data JSONB NOT NULL,           -- Progress payload with status, current, total, etc.
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_job_progress_updated_at ON job_progress(updated_at);
+
+-- ============================================================================
+-- PERFORMANCE_SNAPSHOTS TABLE (real-time performance tracking)
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS performance_snapshots (
+    id SERIAL PRIMARY KEY,
     catalog_id UUID NOT NULL,               -- References catalogs.id
     timestamp TIMESTAMP DEFAULT NOW(),
     phase TEXT NOT NULL,                    -- scanning, hashing, tagging, etc.

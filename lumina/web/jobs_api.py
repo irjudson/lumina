@@ -6,14 +6,14 @@ background jobs (analysis, organization, thumbnail generation).
 """
 
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
-import redis
 from celery.result import AsyncResult
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+
+from lumina.jobs.memory_progress import progress_manager
 
 from ..jobs.celery_app import app as celery_app
 from ..jobs.parallel_duplicates import duplicates_coordinator_task
@@ -23,26 +23,26 @@ from ..jobs.tasks import (
     organize_catalog_task,
 )
 
+
+def track_job(job_id: str, job_type: str, params: dict):
+    """Track job using appropriate backend."""
+    return progress_manager.track_job(job_id, job_type, params, None)
+
+
+def get_recent_jobs(limit: int = 50):
+    """Get recent jobs using appropriate backend."""
+    return progress_manager.get_recent_jobs(limit)
+
+
+def get_job_params(job_id: str):
+    """Get job parameters using appropriate backend."""
+    return progress_manager.get_recent_jobs()[0].get("params", {})
+
+
 logger = logging.getLogger(__name__)
 
-# Job history tracking
-JOB_HISTORY_KEY = "vam:job_history"
+# Job history tracking constants
 MAX_HISTORY_SIZE = 100
-
-# Redis client for job history
-_redis_client = None
-
-
-def get_redis_client() -> redis.Redis:
-    """Get or create Redis client for job history tracking."""
-    global _redis_client
-    if _redis_client is None:
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        _redis_client = redis.Redis(
-            host=redis_host, port=redis_port, db=0, decode_responses=True
-        )
-    return _redis_client
 
 
 # Create router
@@ -153,28 +153,9 @@ class JobList(BaseModel):
 
 
 def _track_job(job_id: str, job_type: str, params: dict) -> None:
-    """Track job submission in Redis for history."""
+    """Track job submission in database for history."""
     try:
-        redis_client = get_redis_client()
-        import json
-        import time
-
-        job_data = {
-            "job_id": job_id,
-            "type": job_type,
-            "params": params,
-            "submitted_at": time.time(),
-        }
-
-        # Store job data with job_id as key
-        redis_client.setex(
-            f"vam:job:{job_id}", 3600 * 24, json.dumps(job_data)  # 24 hour TTL
-        )
-
-        # Add to job history list (most recent first)
-        redis_client.lpush(JOB_HISTORY_KEY, job_id)
-        redis_client.ltrim(JOB_HISTORY_KEY, 0, MAX_HISTORY_SIZE - 1)
-
+        track_job(job_id, job_type, params)
     except Exception as e:
         logger.warning(f"Failed to track job {job_id}: {e}")
 
@@ -694,19 +675,14 @@ async def rerun_job(job_id: str) -> Dict[str, Any]:
         ```
     """
     try:
-        import json
-
-        redis_client = get_redis_client()
-
-        # Fetch original job data from Redis
-        job_data_str = redis_client.get(f"vam:job:{job_id}")
-        if not job_data_str:
+        # Fetch original job data from database
+        job_data = get_job_params(job_id)
+        if not job_data:
             raise HTTPException(
                 status_code=404,
                 detail="Job parameters not found. Job may have expired.",
             )
 
-        job_data = json.loads(job_data_str)
         job_type = job_data.get("type")
         params = job_data.get("params", {})
 
@@ -834,24 +810,18 @@ async def list_active_jobs() -> JobList:
     try:
         jobs: List[JobStatus] = []
 
-        # Get recent job IDs from history
-        redis_client = get_redis_client()
-        job_ids = redis_client.lrange(JOB_HISTORY_KEY, 0, 49)  # Last 50 jobs
-
-        # Convert bytes to strings
-        job_ids = [
-            job_id.decode() if isinstance(job_id, bytes) else job_id
-            for job_id in job_ids
-        ]
+        # Get recent jobs from database
+        recent_jobs = get_recent_jobs(limit=50)
 
         # Get status for each job
-        for task_id in job_ids:
+        for job_data in recent_jobs:
+            task_id = job_data["job_id"]
             result = AsyncResult(task_id, app=celery_app)
             redis_progress = get_last_progress(task_id)
 
             # Determine effective status - always trust Celery for terminal states
             # Terminal states (SUCCESS, FAILURE, etc.) from Celery take precedence
-            # Only use Redis progress data if job is actually still running
+            # Only use progress data if job is actually still running
             TERMINAL_STATES = {
                 "SUCCESS",
                 "FAILURE",
@@ -862,12 +832,12 @@ async def list_active_jobs() -> JobList:
             }
             effective_status = result.state
 
-            # Only use Redis status if Celery state is non-terminal
-            # This prevents stale Redis data from showing completed jobs as running
+            # Only use progress status if Celery state is non-terminal
+            # This prevents stale data from showing completed jobs as running
             if result.state not in TERMINAL_STATES and redis_progress:
-                redis_status = redis_progress.get("status")
-                if redis_status in ("PROGRESS", "STARTED"):
-                    effective_status = redis_status
+                progress_status = redis_progress.get("status")
+                if progress_status in ("PROGRESS", "STARTED"):
+                    effective_status = progress_status
 
             job_status = JobStatus(
                 job_id=task_id,
@@ -909,7 +879,7 @@ async def list_active_jobs() -> JobList:
 
     except Exception as e:
         logger.error(f"Failed to list jobs: {e}")
-        # Fallback to old behavior if Redis fails
+        # Fallback to Celery inspection if database fails
         try:
             inspect = celery_app.control.inspect()
             active = inspect.active()

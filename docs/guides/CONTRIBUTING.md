@@ -96,7 +96,7 @@ pytest
 ### Run with Coverage
 
 ```bash
-pytest --cov=vam_tools --cov-report=term
+pytest --cov=lumina --cov-report=term
 ```
 
 ### Run Specific Test
@@ -127,10 +127,10 @@ Black is our code formatter - it handles all formatting automatically:
 
 ```bash
 # Check formatting
-black --check vam_tools/ tests/
+black --check lumina/ tests/
 
 # Auto-format
-black vam_tools/ tests/
+black lumina/ tests/
 ```
 
 **Configuration**: See `pyproject.toml` for Black settings.
@@ -141,10 +141,10 @@ isort organizes imports:
 
 ```bash
 # Check import sorting
-isort --check-only vam_tools/ tests/
+isort --check-only lumina/ tests/
 
 # Auto-sort imports
-isort vam_tools/ tests/
+isort lumina/ tests/
 ```
 
 **Configuration**: See `pyproject.toml` for isort settings (Black-compatible).
@@ -155,7 +155,7 @@ flake8 catches code quality issues:
 
 ```bash
 # Run linting
-flake8 vam_tools/ tests/
+flake8 lumina/ tests/
 ```
 
 **Configuration**: See `.flake8` for rules.
@@ -170,7 +170,7 @@ Common fixes:
 mypy is optional but recommended:
 
 ```bash
-mypy vam_tools/
+mypy lumina/
 ```
 
 **Note**: mypy failures don't block CI (yet), but we encourage type hints!
@@ -199,11 +199,11 @@ git checkout -b fix/issue-description
 
 ```bash
 # Format code
-black vam_tools/ tests/
-isort vam_tools/ tests/
+black lumina/ tests/
+isort lumina/ tests/
 
 # Check linting
-flake8 vam_tools/ tests/
+flake8 lumina/ tests/
 
 # Run tests
 pytest

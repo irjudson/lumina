@@ -152,10 +152,10 @@ Launch the web interface to explore your catalog:
 
 ```bash
 # Start web server (opens at http://localhost:8765)
-vam-web /path/to/catalog
+lumina-web /path/to/catalog
 
 # Custom port or allow external access
-vam-web /path/to/catalog --port 8080 --host 0.0.0.0
+lumina-web /path/to/catalog --port 8080 --host 0.0.0.0
 ```
 
 The web interface provides:
@@ -169,15 +169,15 @@ The web interface provides:
 
 ```bash
 # Analyze with duplicate detection
-vam-analyze /path/to/catalog -s /path/to/photos --detect-duplicates
+lumina-analyze /path/to/catalog -s /path/to/photos
 
 # Adjust similarity threshold (default: 5, lower = more strict)
-vam-analyze /path/to/catalog -s /path/to/photos \
+lumina-analyze /path/to/catalog -s /path/to/photos \
   --detect-duplicates \
   --similarity-threshold 3
 
 # Launch web UI to review duplicates
-vam-web /path/to/catalog
+lumina-web /path/to/catalog
 # Navigate to "View Duplicates" to see groups and recommended deletions
 ```
 
@@ -193,20 +193,20 @@ Add new photos to an existing catalog without reprocessing:
 
 ```bash
 # Scan will skip files already in catalog
-vam-analyze /path/to/catalog -s /path/to/photos
+lumina-analyze /path/to/catalog -s /path/to/photos
 ```
 
 ### Manage Your Catalog
 
 ```bash
 # Start fresh (clears existing catalog, creates backup first)
-vam-analyze /path/to/catalog -s /path/to/photos --clear
+lumina-analyze /path/to/catalog -s /path/to/photos --clear
 
 # Repair corrupted catalog
-vam-analyze /path/to/catalog --repair
+lumina-analyze /path/to/catalog --repair
 
 # Verbose logging for troubleshooting
-vam-analyze /path/to/catalog -s /path/to/photos -v
+lumina-analyze /path/to/catalog -s /path/to/photos -v
 ```
 
 For detailed workflows, see the **[User Guide](./docs/guides/USER_GUIDE.md)**.
@@ -243,10 +243,10 @@ pytest -n auto
 pytest -m integration
 
 # Run code quality checks
-black vam_tools/ tests/
-isort vam_tools/ tests/
-flake8 vam_tools/ tests/
-mypy vam_tools/
+black lumina/ tests/
+isort lumina/ tests/
+flake8 lumina/ tests/
+mypy lumina/
 ```
 
 ---

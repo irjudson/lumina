@@ -53,12 +53,12 @@ def web(catalog_path: str, host: str, port: int, reload: bool) -> None:
             if not catalog:
                 console.print("[red]Error: Catalog not found in database[/red]")
                 console.print(
-                    "\nRun [cyan]vam-analyze[/cyan] first to create a catalog."
+                    "\nRun [cyan]lumina-analyze[/cyan] first to create a catalog."
                 )
                 return
     except Exception as e:
         console.print(f"[red]Error: Could not connect to catalog database: {e}[/red]")
-        console.print("\nRun [cyan]vam-analyze[/cyan] first to create a catalog.")
+        console.print("\nRun [cyan]lumina-analyze[/cyan] first to create a catalog.")
         return
 
     version_str = get_version_string()

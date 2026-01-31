@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 
 class TestAnalyzeCLI:
-    """Tests for vam-analyze CLI command."""
+    """Tests for lumina-analyze CLI command."""
 
     def test_analyze_no_source_error(self, tmp_path: Path) -> None:
         """Test that analyze requires --source when not in repair mode."""

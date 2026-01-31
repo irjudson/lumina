@@ -6,7 +6,7 @@
 
 PROJECT_ID="lumina"
 VENV_PATH="/home/irjudson/Projects/lumina/venv/bin/pytest"
-WORKER_GROUP="vam_tools_workers"
+WORKER_GROUP="lumina_workers"
 
 echo "============================================"
 echo "Killing lumina pytest processes..."

@@ -51,7 +51,7 @@ docker-compose -f docker-compose.test.yml run --rm test-runner pytest tests/ -n 
 docker-compose -f docker-compose.test.yml run --rm test-runner pytest tests/ -vv
 
 # Run with coverage
-docker-compose -f docker-compose.test.yml run --rm test-runner pytest tests/ --cov=vam_tools --cov-report=html
+docker-compose -f docker-compose.test.yml run --rm test-runner pytest tests/ --cov=lumina --cov-report=html
 
 # Run only failed tests from last run
 docker-compose -f docker-compose.test.yml run --rm test-runner pytest tests/ --lf -v
@@ -202,7 +202,7 @@ lumina/
 ├── Dockerfile.test            # Test container image
 ├── .dockerignore              # Files to exclude from Docker build
 ├── tests/                     # Test files
-├── vam_tools/                 # Source code
+├── lumina/                    # Source code
 └── TESTING.md                 # This file
 ```
 

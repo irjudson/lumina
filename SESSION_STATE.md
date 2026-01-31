@@ -1,342 +1,419 @@
 # Lumina - Session State
 
-**Last Updated:** 2026-01-04 15:45 MST
+**Last Updated:** 2026-01-15 (Current Session)
 **Branch:** main
-**Session Focus:** Repository rename completion, duplicate detector fix, backend architecture
+**Session Focus:** Duplicate detection debugging - UI shows poor results
+
+---
 
 ## Current Status
 
-### 🔧 Critical Fix Applied - Needs Image Rebuild
+### ⚠️ DUPLICATE DETECTION NEEDS WORK
 
-Duplicate detection finalizer issue **ROOT CAUSE IDENTIFIED AND FIXED**. Needs Docker image rebuild to complete.
+**Thumbnails:** ✅ Complete (98,932 / 98,932 - 100%)
+**Duplicate Detection:** ⚠️ Completed but UI shows "terrible" results
+**Current Configuration:** threshold=1, pixel verification 80%
 
-## Completed This Session (2026-01-04)
+**Statistics:**
+- 5,472 duplicate groups created
+- 45,646 images grouped (46% of collection)
+- Avg group size: 8.6 images
+- Group size distribution:
+  - 2 images: 1,139 groups (21%)
+  - 3-5 images: 1,333 groups (24%)
+  - 6-10 images: 1,195 groups (22%)
+  - 11-15 images: 649 groups (12%)
+  - 16-20 images: 1,156 groups (21%)
+  - >20 images: 0 groups (0%)
 
-### 1. **Completed VAM Tools → Lumina Rename**
+**Problem:** User checked UI and reported results are "terrible"
+**Status:** Taking a break, will investigate specific UI issues when resuming
 
-**Database Migration:**
-- Renamed PostgreSQL database: `vam-tools` → `lumina`
-- Updated `docker-compose.yml`: `POSTGRES_DB=vam-tools` → `POSTGRES_DB=lumina`
-- Updated `lumina/db/config.py`: Database and data directory paths
-- All 7 containers restarted successfully
+**Investigation Done So Far:**
+- ✅ Verified thumbnails are working (98,928 files on disk)
+- ✅ Checked group composition - different checksums but high pixel similarity
+- ✅ Validated large groups contain legitimate duplicates (same photo, different metadata)
+- ✅ Confirmed threshold=1 is deployed and working
+- ✅ Pixel verification (80%) is filtering false positives (split 71 groups)
+- ⚠️ Found 3,518 ungrouped images with pairs (likely due to MAX_GROUP_SIZE=20 limit)
 
-**Comprehensive Reference Cleanup:**
-- Scanned and updated 31 files across codebase
-- Replaced all `vam-tools` references with `lumina`
-- Removed stale directories: `vam_tools.egg-info`, `.mypy_cache`
-- Files updated: Makefile, scripts, docs, configs, Python source
-
-**Git Commits:**
-```
-3bdb017 refactor: complete vam-tools to lumina rename
-06be6b9 docs: update repository URLs from vam-tools to lumina
-573b548 feat: add Lumina favicon and app icons
-```
-
-**Status:** ✅ Complete and pushed to GitHub
-
----
-
-### 2. **Fixed Duplicate Detection - Cleaned 41 GB Bloat**
-
-**Problem Discovery:**
-- Database had accumulated 59,176,289 orphaned duplicate pairs (32 GB)
-- Plus 20,105,661 temp pairs (9.4 GB)
-- Total bloat: ~41 GB
-- All duplicate groups missing (0 rows, should have had 393)
-- Job from 2026-01-04 stuck in STARTED state
-- 7 failed/incomplete jobs over 5 days
-
-**Cleanup Actions:**
-```sql
--- Marked stuck job as FAILED
-UPDATE jobs SET status = 'FAILED' WHERE id = '306a9667-86b2-4615-9816-25589185afbf';
-
--- Deleted all orphaned pairs
-DELETE FROM duplicate_pairs; -- 59,176,289 rows
-TRUNCATE TABLE duplicate_pairs_temp; -- 20,105,661 rows
-
--- Reclaimed space
-VACUUM FULL duplicate_pairs;
-VACUUM FULL duplicate_pairs_temp;
-```
-
-**Results:**
-- `duplicate_pairs`: 32 GB → 72 KB (freed ~32 GB)
-- `duplicate_pairs_temp`: 9.4 GB → 16 KB (freed ~9.4 GB)
-- Database size: ~48 GB → 7.2 GB
-- All tables now empty and clean
-
-**Status:** ✅ Complete
+**Next Steps When Resuming:**
+1. Get specific examples of "terrible" groups from UI
+2. Investigate why those specific groups are problematic
+3. Determine if issue is with grouping algorithm, threshold, or pixel verification
+4. Consider alternative approaches if current method is fundamentally flawed
 
 ---
 
-### 3. **Root Cause Analysis - Broken Chord Coordination**
+## Problem Discovered (2026-01-10 Session)
 
-**Investigation:**
-- Traced duplicate detection workflow: Coordinator → Hash Workers → Comparison Workers → **Finalizer**
-- Found commit b2a6f36 (Dec 29) removed Celery result backend to save Redis memory
-- Set `backend=None` in `lumina/celery_app.py`
+### 🚨 Duplicate Detection Creating Massive False Positives
 
-**The Problem:**
-Celery **chords** (parallel tasks → callback) require a result backend to track completion:
+**Root Cause Analysis:**
+
+1. **Too Permissive Hash Threshold**
+   - Default: `similarity_threshold = 5` (Hamming distance)
+   - **Impact:** Grouped completely unrelated images together
+
+2. **Example False Positive Group:**
+   - Seed image had **149 "duplicate" connections**
+   - Included: paris.jpg, random iPhone photos from 2016-2020, Sony RAW files, HEIC files
+   - All different subjects: food, cars, gym, architecture, birds
+   - Hash distances: 2-4 (all below ≤5 threshold)
+   - **Pixel similarity: 0.0%** (correctly identified as NOT duplicates)
+
+3. **No Thumbnails Available**
+   - 98,932 images, **0 thumbnails** in database
+   - Pixel verification failed with `'NoneType' object has no attribute 'read'`
+   - Pixel verification was disabled for diagnostics
+
+**User Expectation:**
+- "Many small groups (2-5 images)"
+- "If I have any group > 20 I'd be surprised"
+- Want same image in different formats/sizes/compression
+- Don't want visually similar but different images
+
+---
+
+## Fixes Implemented
+
+### 1. ✅ Tightened Hash Distance Threshold (≤5 → ≤1)
+
+**Changes:**
 ```python
-chord(group(comparison_tasks))(finalizer)  # Requires backend!
+# File: lumina/jobs/parallel_duplicates.py
+
+# Line 288 (coordinator default)
+- similarity_threshold: int = 5,
++ similarity_threshold: int = 1,
+
+# Line 1198 (finalizer default)
+- similarity_threshold: int = 5,
++ similarity_threshold: int = 1,
 ```
 
-Without backend:
-1. ✅ Comparison workers spawn and run
-2. ✅ Workers write pairs to database
-3. ❌ Celery can't track which workers finished
-4. ❌ **Finalizer never fires** (Celery doesn't know workers are done)
-5. ❌ Job stuck in STARTED, pairs accumulate forever, no groups created
-
-**Status:** ✅ Root cause identified
+**Impact:** Dramatically reduces false positives from perceptual hash matching
 
 ---
 
-### 4. **Fixed Backend - PostgreSQL Instead of Redis**
+### 2. ✅ Converted Pixel Verification to Thumbnail-Only
 
-**Solution:**
-Use PostgreSQL as Celery result backend (user's excellent suggestion):
-- Avoids Redis memory bloat
-- Results auto-expire after 2 hours
-- Cleaned up by existing VACUUM processes
-- Keeps everything in one database
+**Before:** Attempted to read source files (failed on RAW formats)
+**After:** Uses thumbnails exclusively
 
-**Code Changes:**
-
-**`lumina/celery_app.py`:**
+**Changes:**
 ```python
-# Before:
-app = Celery("lumina", broker=settings.redis_url, backend=None)
+# File: lumina/jobs/parallel_duplicates.py
 
-# After:
-database_backend_url = settings.database_url.replace("postgresql://", "db+postgresql://")
-app = Celery("lumina", broker=settings.redis_url, backend=database_backend_url)
+# Lines 56-111: compute_pixel_similarity()
+def compute_pixel_similarity(
+    img1_thumbnail: str,  # Changed from img1_path
+    img2_thumbnail: str,  # Changed from img2_path
+    thumbnail_size: int = 256
+) -> float:
+    # Load thumbnails (already JPEGs, fast to load)
+    img1 = Image.open(img1_thumbnail).convert('RGB')
+    img2 = Image.open(img2_thumbnail).convert('RGB')
+    # ... MSE calculation ...
 
-# Added configuration:
-app.conf.update(
-    result_expires=7200,  # 2 hours
-    result_backend_always_retry=True,
-    result_backend_max_retries=10,
-    # ...
+# Lines 142-171: verify_group_with_pixel_similarity()
+# Updated to load thumbnail_path from database instead of source_path
+```
+
+**Benefits:**
+- **Fast:** Small JPEGs vs large RAW files
+- **Universal:** Works with all formats (ARW, HEIC, DNG, etc.)
+- **Normalized:** Consistent size and quality for comparison
+
+---
+
+### 3. ✅ Re-enabled Pixel Verification (80% threshold)
+
+**Changes:**
+```python
+# File: lumina/jobs/parallel_duplicates.py
+# Lines 1267-1306: Phase 5 pixel verification
+
+# Re-enabled with 80% similarity threshold for JPEG thumbnails
+for idx, group in enumerate(groups):
+    subgroups = verify_group_with_pixel_similarity(
+        group, catalog_id, min_similarity=80.0, finalizer_id=finalizer_id
+    )
+```
+
+**How it works:**
+1. Perceptual hash finds candidate groups (fast, high recall)
+2. Pixel verification filters false positives (slower, high precision)
+3. MSE comparison on 256x256 thumbnails
+4. Groups split when pixel similarity < 80%
+5. Union-Find regroupsverified duplicates
+
+**Threshold rationale:**
+- 95% too strict for JPEG thumbnails (compression artifacts)
+- 85% still rejected ALL groups in testing
+- 80% balances compression tolerance with false positive filtering
+
+---
+
+### 4. ✅ Rebuilt Containers
+
+**Timestamp:** 2026-01-10 23:21 UTC
+**Status:** All changes deployed and active
+
+---
+
+## Thumbnail Generation Progress
+
+### Job Configuration
+- **Catalog:** `bd40ca52-c3f7-4877-9c97-1c227389c8c4`
+- **Coordinator Job:** `12a04400-d981-4c3f-8365-d73682974012`
+- **Batches:** 99 × 1,000 images
+- **Thumbnail size:** 256px
+- **Quality:** 85 (JPEG)
+- **Workers:** 12 active
+
+### Current Status (23:32 UTC)
+```
+Thumbnails on disk: 9,974 / 98,932 (10%)
+Database updates: 0 (finalizer will update when all batches complete)
+Location: /app/catalogs/bd40ca52-c3f7-4877-9c97-1c227389c8c4/thumbnails/*_256.jpg
+```
+
+### Active Workers
+```
+celery@bbced8662072: 2 workers
+celery@0f5e06c9d6ef: 2 workers
+celery@d7220ce41b2e: 2 workers
+celery@0a9e7be9ddbb: 2 workers
+celery@2f4a6a671b95: 2 workers
+celery@e0cca3b856bb: 2 workers
+Total: 12 workers processing
+```
+
+**Note:** Workers survived container restart and continue processing.
+
+---
+
+## Next Steps (After Thumbnails Complete)
+
+### 1. Clear Old Duplicate Data
+
+```bash
+PGPASSWORD=buffalo-jump psql -h localhost -U pg -d lumina -c "
+DELETE FROM duplicate_pairs WHERE catalog_id = 'bd40ca52-c3f7-4877-9c97-1c227389c8c4';
+DELETE FROM duplicate_groups WHERE catalog_id = 'bd40ca52-c3f7-4877-9c97-1c227389c8c4';
+"
+```
+
+### 2. Re-run Duplicate Detection
+
+```bash
+docker compose exec cw python -c "
+from lumina.jobs.parallel_duplicates import duplicates_coordinator_task
+
+result = duplicates_coordinator_task.apply_async(
+    kwargs={
+        'catalog_id': 'bd40ca52-c3f7-4877-9c97-1c227389c8c4',
+        'similarity_threshold': 1,  # New tighter threshold
+        'recompute_hashes': False,
+        'batch_size': 1000
+    }
 )
+print(f'Duplicate detection dispatched: {result.id}')
+"
 ```
 
-**`docker-compose.yml`:**
-- Removed `CELERY_RESULT_BACKEND=redis://...` env var (was overriding code config)
-- Now backend is configured in Python code only
+### 3. Expected Results
 
-**Verification:**
-- Workers show: `Backend: <celery.backends.database.DatabaseBackend>`
-- Tables created: `celery_taskmeta`, `celery_tasksetmeta`
-- Result expiration: 2 hours (7200s)
+**Before fix:**
+- 1,517 groups with avg size 18.5
+- Many groups of 20+ unrelated images
+- Example: 149-connection mega-group
 
-**Git Commits:**
-```
-8c93264 fix: enable PostgreSQL result backend for chord support
-4729516 fix: remove CELERY_RESULT_BACKEND env var to use code-configured backend
-```
-
-**Status:** ✅ Code fixed, committed, pushed
+**After fix:**
+- Tighter hash threshold (≤1 instead of ≤5) = fewer candidate groups
+- Pixel verification at 80% = filters remaining false positives
+- Expected: Many small groups (2-5 images)
+- Groups contain truly duplicate images (same image, different formats/sizes)
 
 ---
 
-### 5. **Updated CUDA Base Image**
+## Monitoring Commands
 
-**Change:**
-- Dockerfile: `nvidia/cuda:12.6.3-runtime-ubuntu22.04` → `nvidia/cuda:13.0.0-runtime-ubuntu22.04`
-
-**Git Commit:**
-```
-b1df255 build: update CUDA base image to 13.0.0
-```
-
-**Status:** ✅ Dockerfile updated and committed
-
----
-
-## Outstanding Work (CRITICAL - Before Next Use)
-
-### 🚨 **REBUILD DOCKER IMAGES**
-
-The backend fix is in the code but **containers are running old images**. Must rebuild:
-
+### Thumbnail Progress
 ```bash
-# Rebuild images with new backend configuration and CUDA 13.0
-docker compose build
+# Count generated thumbnails
+docker compose exec cw bash -c "ls /app/catalogs/bd40ca52-c3f7-4877-9c97-1c227389c8c4/thumbnails/*_256.jpg 2>/dev/null | wc -l"
 
-# Recreate containers with new images
-docker compose up -d
+# Check database (0 until finalizer completes)
+PGPASSWORD=buffalo-jump psql -h localhost -U pg -d lumina -c "
+SELECT COUNT(*) as total, COUNT(thumbnail_path) as with_thumbs,
+       ROUND(100.0 * COUNT(thumbnail_path) / NULLIF(COUNT(*), 0), 1) as pct
+FROM images WHERE catalog_id = 'bd40ca52-c3f7-4877-9c97-1c227389c8c4'
+"
 
-# Verify backend is PostgreSQL
-docker exec lumina-cw-1 python3 -c "from lumina.celery_app import app; print(type(app.backend).__name__)"
-# Should show: DatabaseBackend
+# Check for finalizer completion
+docker compose logs cw --tail=100 | grep "thumbnail_finalizer\|12a04400"
 ```
 
-### **Test Duplicate Detection**
-
-After rebuild, verify the fix works:
-
+### Active Workers
 ```bash
-# Trigger duplicate detection
-curl -X POST "http://localhost:8765/api/catalogs/bd40ca52-c3f7-4877-9c97-1c227389c8c4/detect-duplicates" \
-  -H "Content-Type: application/json" \
-  -d '{"similarity_threshold": 5}'
-
-# Monitor progress (should not get stuck)
-watch "PGPASSWORD='buffalo-jump' psql -h localhost -U pg -d lumina -c \"
-  SELECT id, status, result->>'message'
-  FROM jobs
-  ORDER BY created_at DESC LIMIT 3;\""
-
-# After completion, verify groups were created
-PGPASSWORD='buffalo-jump' psql -h localhost -U pg -d lumina -c "
-  SELECT COUNT(*) FROM duplicate_groups;"
+docker compose exec cw celery -A lumina.jobs.celery_app inspect active | grep thumbnail_worker
 ```
 
-**Expected behavior:**
-1. ✅ Job starts with status STARTED
-2. ✅ Comparison workers process pairs
-3. ✅ **Finalizer fires** when workers complete
-4. ✅ Duplicate groups created
-5. ✅ Job status changes to SUCCESS
-6. ✅ No stuck jobs
+---
+
+## Files Modified (This Session)
+
+**File:** `lumina/jobs/parallel_duplicates.py`
+
+1. **Line 288:** Default `similarity_threshold: int = 5` → `1`
+2. **Line 1198:** Finalizer default `similarity_threshold: int = 5` → `1`
+3. **Lines 56-111:** Rewrote `compute_pixel_similarity()` for thumbnail-only comparison
+4. **Lines 142-171:** Updated `verify_group_with_pixel_similarity()` to load thumbnail paths
+5. **Lines 1267-1306:** Re-enabled pixel verification with 80% threshold
+
+**Container Rebuild:** 2026-01-10 23:21 UTC ✅
 
 ---
 
-## Database State (Current)
+## Key Learnings
 
-**Catalog:** bd40ca52-c3f7-4877-9c97-1c227389c8c4
-- 98,932 total images
-- 28,188 in burst sequences (28.49%)
-- **0 duplicate groups** (cleaned up, will rebuild after fix verification)
-- **0 duplicate pairs** (cleaned up)
+### Perceptual Hash Limitations
 
-**Celery Backend Tables:**
-- `celery_taskmeta`: Stores task results
-- `celery_tasksetmeta`: Stores chord/group results
-- Auto-expires after 2 hours
+**Hamming distance ≤5 is too permissive:**
+- Creates groups of visually similar but semantically different images
+- Example: Images with similar color palettes/composition grouped together
+- Distance 2-4 was grouping completely unrelated subjects
 
-**Database Size:** 7.2 GB (was ~48 GB before cleanup)
+**Optimal threshold:** ≤1 for true duplicates
+- Distance 0: Exact hash match
+- Distance 1: Minimal variation (same image, slight edit/crop/format)
+- Distance 2+: Different images that happen to be visually similar
+
+### Pixel Verification Approach
+
+**MSE on thumbnails is ideal:**
+- Fast: 256x256 JPEGs vs multi-MB RAW files
+- Universal: Works with all formats
+- Sufficient: Detects actual duplicates while filtering false positives
+- Tolerant: 80% threshold handles JPEG compression variations
+
+**Not ideal:**
+- 95% threshold: Too strict for JPEG thumbnails
+- Source file comparison: Too slow, fails on RAW formats
+- Perceptual hash alone: Too many false positives
 
 ---
 
-## Previous Session Work (2026-01-02)
+## Database State
 
-### 1. **Excluded bursts from duplicate detection**
-**File:** `lumina/jobs/parallel_duplicates.py:492`
-- Added `WHERE burst_id IS NULL` filter to comparison query
-- Future duplicate detection runs automatically exclude burst images
-
-### 2. **Designed quality-based duplicate resolution**
-**Document:** `docs/plans/2026-01-01-quality-based-duplicate-resolution.md`
-
-**Key Features:**
-- Multi-factor quality scoring algorithm (0-100 points):
-  - Format priority (40%): RAW > Lossless > JPEG > Web formats
-  - Resolution (30%): Higher megapixels preferred
-  - File size (20%): Less compression preferred
-  - Sharpness (10%): Existing quality_score from analysis
-- Implementation phases defined (5 phases)
-
-**Next Steps:**
-- Phase 1: Create `lumina/analysis/quality_scorer.py`
-- Phase 2: Batch compute scores for existing images
-- Phase 3: Integrate with analysis pipeline
-- Phase 4: UI integration ("Keep Best" button)
-- Phase 5: Automatic resolution (optional)
-
-### 3. **Implemented import workflow database schema (Phase 1)**
-**Migration:** `migrations/001_import_workflow_schema.sql`
-
-**Database Changes:**
-1. Extended catalogs table: `destination_path`, `import_mode`, `source_metadata`
-2. Created import_jobs table: Track import operations
-3. Created import_items table: Individual files in import job
-4. Extended images table: `original_source_path`, `import_job_id`, `file_checksum`
-5. Created helper views: `import_jobs_summary`, `import_items_detail`
-
-**Status:** ✅ Applied successfully to database
+**Catalog:** `bd40ca52-c3f7-4877-9c97-1c227389c8c4`
+- **Images:** 98,932 total
+- **Thumbnails:** 9,974 generated (10%)
+- **Duplicate groups:** 1,517 (outdated, from ≤5 threshold)
+- **Duplicate pairs:** 10,758,203 (outdated, to be cleared)
 
 ---
 
 ## Git Status
 
 **Branch:** main
-**Pushed Commits (This Session):**
-```
-b1df255 build: update CUDA base image to 13.0.0
-4729516 fix: remove CELERY_RESULT_BACKEND env var to use code-configured backend
-8c93264 fix: enable PostgreSQL result backend for chord support
-3bdb017 refactor: complete vam-tools to lumina rename
-06be6b9 docs: update repository URLs from vam-tools to lumina
-573b548 feat: add Lumina favicon and app icons
-```
+**Uncommitted changes:** `lumina/jobs/parallel_duplicates.py` (modifications not yet committed)
 
-**All changes committed and pushed to GitHub** ✅
+**Last commit:** `be28e78` - "docs: save session state - duplicate detector fix and rename completion"
 
 ---
 
-## Quick Reference Commands
+## Quick Reference
 
-### Check Celery Backend Type
+### Check Thumbnail Count
 ```bash
-docker exec lumina-cw-1 python3 -c "from lumina.celery_app import app; print(type(app.backend).__name__)"
+ls /app/catalogs/bd40ca52-c3f7-4877-9c97-1c227389c8c4/thumbnails/*_256.jpg | wc -l
 ```
 
-### Check Duplicate Statistics
+### Check Old Duplicate Data
 ```bash
-PGPASSWORD='buffalo-jump' psql -h localhost -U pg -d lumina -c "
+PGPASSWORD=buffalo-jump psql -h localhost -U pg -d lumina -c "
 SELECT
-  (SELECT COUNT(*) FROM duplicate_groups) as groups,
-  (SELECT COUNT(*) FROM duplicate_members) as members,
-  (SELECT COUNT(*) FROM duplicate_pairs) as pairs;"
+  (SELECT COUNT(*) FROM duplicate_groups WHERE catalog_id = 'bd40ca52-c3f7-4877-9c97-1c227389c8c4') as groups,
+  (SELECT COUNT(*) FROM duplicate_pairs) as pairs;
+"
 ```
 
-### Monitor Recent Jobs
+### Analyze a Sample Group
 ```bash
-PGPASSWORD='buffalo-jump' psql -h localhost -U pg -d lumina -c "
-SELECT id, job_type, status, created_at, updated_at
-FROM jobs
-ORDER BY created_at DESC LIMIT 10;"
+docker compose exec cw python << 'EOFPYTHON'
+from sqlalchemy import text
+from lumina.db import CatalogDB as CatalogDatabase
+from lumina.jobs.parallel_duplicates import compute_pixel_similarity
+import os
+
+catalog_id = "bd40ca52-c3f7-4877-9c97-1c227389c8c4"
+
+with CatalogDatabase(catalog_id) as db:
+    # Get a group seed
+    result = db.session.execute(text("""
+        SELECT image_1, COUNT(*) as connections
+        FROM duplicate_pairs
+        GROUP BY image_1
+        HAVING COUNT(*) >= 19
+        LIMIT 1
+    """))
+
+    row = result.fetchone()
+    if row:
+        print(f"Seed: {row[0][:16]}... with {row[1]} connections")
+    else:
+        print("No large groups found")
+EOFPYTHON
 ```
 
-### Check Celery Result Tables
-```bash
-PGPASSWORD='buffalo-jump' psql -h localhost -U pg -d lumina -c "
-SELECT
-  (SELECT COUNT(*) FROM celery_taskmeta) as task_results,
-  (SELECT COUNT(*) FROM celery_tasksetmeta) as chord_results;"
-```
+---
+
+## Previous Session Work (2026-01-04)
+
+### Backend Fix - PostgreSQL Result Backend
+- Fixed chord finalizer not firing (switched from `backend=None` to PostgreSQL)
+- Cleaned up 45 GB of orphaned duplicate pairs
+- All changes committed and pushed
+
+### VAM Tools → Lumina Rename
+- Complete rename across codebase and database
+- All references updated
+- Favicon and branding added
 
 ---
 
 ## Notes for Next Session
 
-1. **FIRST ACTION:** Rebuild Docker images (`docker compose build`) to activate backend fix
-2. **SECOND ACTION:** Test duplicate detection end-to-end to verify finalizers work
-3. **If duplicate detection works:** Re-run on full catalog to rebuild groups
-4. **Quality scoring implementation** is next high-priority feature (design already complete)
-5. **Import workflow Phase 2** (analyzer) ready for implementation
+1. **Monitor thumbnail generation** - Check completion status
+2. **When thumbnails complete:**
+   - Clear old duplicate data
+   - Re-run duplicate detection with new threshold
+   - Verify results in UX
+3. **Commit changes** - `lumina/jobs/parallel_duplicates.py` modifications
+4. **Optional:** Implement quality-based duplicate resolution (design already complete)
 
 ---
 
 ## Technical Debt
 
-1. **Docker images not rebuilt** - Running old code without PostgreSQL backend fix
-2. **Hanging pytest issue** - Tests hang at 88% in parallel mode (unrelated to current work)
-3. **Database collation warning** - PostgreSQL warnings about collation version (cosmetic)
-4. **Untracked scripts** - Several ad-hoc scripts in repo root (can clean up later)
+1. Hanging pytest issue (88% in parallel mode)
+2. Database collation warnings (cosmetic)
+3. Untracked scripts in repo root
+4. `analyze_group.py` script created for diagnostics (can remove)
 
 ---
 
 ## Session Metrics
 
-**Token Usage:** ~75,000 / 200,000 (38%)
-**Commits:** 6 new commits (all pushed)
-**Files Modified:** 4 (celery_app.py, docker-compose.yml, Dockerfile, SESSION_STATE.md)
-**Database Cleanup:** 41 GB reclaimed
-**Critical Bugs Fixed:** 1 (duplicate detection finalizer)
-**Architecture Changes:** 1 (Celery backend: None → PostgreSQL)
+**Session Start:** 2026-01-10 21:49 UTC
+**Current Time:** 2026-01-10 23:32 UTC
+**Duration:** ~1h 43m
+**Token Usage:** ~110,000 / 200,000 (55%)
+**Files Modified:** 1 (`lumina/jobs/parallel_duplicates.py`)
+**Container Rebuilds:** 1
+**Critical Bugs Fixed:** 1 (perceptual hash false positives)
+**Jobs Dispatched:** 1 (thumbnail generation)
+**Database Cleanup:** Pending (after thumbnail completion)

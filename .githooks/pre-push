@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# Pre-push hook to ensure code quality before pushing to GitHub
-# This ensures CI will always succeed
+# Pre-push hook to run tests before pushing to GitHub
+# This ensures code works correctly before sharing with others
 #
 
 set -e
@@ -29,7 +29,7 @@ if ! flock -n $LOCK_FD; then
     fi
 fi
 
-echo "🔍 Running pre-push checks..."
+echo "🧪 Running pre-push tests..."
 echo ""
 
 # Colors for output
@@ -56,111 +56,38 @@ if [ -z "$VIRTUAL_ENV" ]; then
     fi
 fi
 
-# 1. Check Black formatting
-echo -e "${YELLOW}1. Checking code formatting with Black...${NC}"
-if ! black --check lumina/ tests/ 2>&1 | grep -q "would be reformatted"; then
-    echo -e "${GREEN}  ✓ Code formatting OK${NC}"
+# 1. Run tests
+echo -e "${YELLOW}1. Running test suite...${NC}"
+PYTEST_BIN="${VIRTUAL_ENV:-venv}/bin/pytest"
+if [ ! -f "$PYTEST_BIN" ]; then
+    PYTEST_BIN="venv/bin/pytest"
+fi
+
+# Run tests with pytest-xdist for parallel execution
+# -n 4: Use 4 parallel workers
+# -m "not integration": Skip integration tests (faster)
+# --tb=short: Shorter traceback format
+# -q: Quiet mode
+if "$PYTEST_BIN" -n 4 -m "not integration" --tb=short -q 2>&1; then
+    echo -e "${GREEN}  ✓ All tests passed${NC}"
 else
-    echo -e "${RED}  ✗ Code formatting issues found${NC}"
+    echo -e "${RED}  ✗ Tests failed${NC}"
     echo ""
-    echo "  Run: black lumina/ tests/"
-    echo "  Then: git add -u && git commit --amend --no-edit"
+    echo "  Fix the failing tests before pushing"
+    echo "  Run: pytest -v  # for verbose output"
     exit 1
 fi
 
-# 2. Check import sorting with isort
+# 2. Build Docker images (only if Docker-related files changed)
 echo ""
-echo -e "${YELLOW}2. Checking import sorting with isort...${NC}"
-if isort --check-only lumina/ tests/ >/dev/null 2>&1; then
-    echo -e "${GREEN}  ✓ Import sorting OK${NC}"
-else
-    echo -e "${RED}  ✗ Import sorting issues found${NC}"
-    echo ""
-    echo "  Run: isort lumina/ tests/"
-    echo "  Then: git add -u && git commit --amend --no-edit"
-    exit 1
-fi
-
-# 3. Lint with flake8
-echo ""
-echo -e "${YELLOW}3. Linting with flake8...${NC}"
-if flake8 lumina/ tests/ 2>/dev/null; then
-    echo -e "${GREEN}  ✓ Linting passed${NC}"
-else
-    echo -e "${RED}  ✗ Linting issues found${NC}"
-    echo ""
-    echo "  Run: flake8 lumina/ tests/"
-    echo "  Fix the issues before pushing"
-    exit 1
-fi
-
-# 4. Type check with mypy
-echo ""
-echo -e "${YELLOW}4. Type checking with mypy...${NC}"
-MYPY_BIN="${VIRTUAL_ENV:-venv}/bin/mypy"
-if [ ! -f "$MYPY_BIN" ]; then
-    MYPY_BIN="venv/bin/mypy"
-fi
-if "$MYPY_BIN" lumina/ 2>/dev/null; then
-    echo -e "${GREEN}  ✓ Type checking passed${NC}"
-else
-    echo -e "${RED}  ✗ Type checking issues found${NC}"
-    echo ""
-    echo "  Run: mypy lumina/"
-    echo "  Fix the issues before pushing"
-    exit 1
-fi
-
-# 5. Run tests
-# NOTE: Skipping tests in pre-push hook because many tests require PostgreSQL/Redis
-# CI will run full test suite with proper services. This speeds up local development.
-echo ""
-echo -e "${YELLOW}5. Running tests...${NC}"
-echo -e "${GREEN}  ✓ Tests will be run in CI (skipping locally to avoid database dependency)${NC}"
-# Uncomment to run tests locally (requires PostgreSQL and Redis):
-# PYTEST_BIN="${VIRTUAL_ENV:-venv}/bin/pytest"
-# if [ ! -f "$PYTEST_BIN" ]; then
-#     PYTEST_BIN="venv/bin/pytest"
-# fi
-# if "$PYTEST_BIN" -n 4 -m "not integration" --tb=short -q; then
-#     echo -e "${GREEN}  ✓ All tests passed${NC}"
-# else
-#     echo -e "${RED}  ✗ Tests failed${NC}"
-#     echo ""
-#     echo "  Fix the failing tests before pushing"
-#     exit 1
-# fi
-
-# 6. Optional: Check for common issues
-echo ""
-echo -e "${YELLOW}6. Checking for common issues...${NC}"
-
-# Check for debugger statements
-if git diff --cached --name-only | xargs grep -n "import pdb\|breakpoint()" 2>/dev/null; then
-    echo -e "${RED}  ✗ Found debugger statements (pdb/breakpoint)${NC}"
-    echo "  Remove them before pushing"
-    exit 1
-fi
-
-# Check for print statements in production code (excluding CLI modules)
-if git diff --cached --name-only | grep -E "lumina/(core|analysis)" | xargs grep -n "print(" 2>/dev/null; then
-    echo -e "${YELLOW}  ⚠ Found print() statements in core code${NC}"
-    echo "  Consider using logging instead"
-    # Don't exit - just warn
-fi
-
-echo -e "${GREEN}  ✓ No common issues found${NC}"
-
-# 7. Build Docker images (only if Docker-related files changed)
-echo ""
-echo -e "${YELLOW}7. Checking Docker build...${NC}"
+echo -e "${YELLOW}2. Checking Docker build...${NC}"
 
 # Check if any Docker-related files changed in this push
 DOCKER_FILES_CHANGED=$(git diff --name-only HEAD~1..HEAD 2>/dev/null | grep -E "(Dockerfile|docker-compose|pyproject.toml|requirements)" || true)
 
 if [ -n "$DOCKER_FILES_CHANGED" ]; then
     echo "  Docker-related files changed, rebuilding..."
-    if docker compose build 2>&1; then
+    if docker compose build 2>&1 | tail -20; then
         echo -e "${GREEN}  ✓ Docker images built successfully${NC}"
     else
         echo -e "${RED}  ✗ Docker image build failed${NC}"

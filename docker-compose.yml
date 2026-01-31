@@ -1,111 +1,42 @@
-name: lumina
-
 services:
-
-  # Web API server
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: lumina-web
-    # No GPU needed - web API just dispatches jobs to workers
+  lumina:
+    image: lumina:latest
+    container_name: lumina
     ports:
       - "8765:8000"
     volumes:
       # Mount catalog directory for persistence
       - ${CATALOG_PATH:-~/catalogs}:/app/catalogs
+      # Mount PostgreSQL data for persistence
+      - lumina-pgdata:/var/lib/postgresql/14/main
       # Mount host directories to access user files
       - /home:/host/home:ro
       - /mnt/synology:/host/synology:ro
-      # Mount test photos for development
-      - ./test-photos:/app/test-photos:ro
       # Development: mount source code for live reload
       - ./lumina:/app/lumina
+      # Mount MPS directories for GPU sharing
+      - /tmp/nvidia-mps:/tmp/nvidia-mps
+      - /tmp/nvidia-log:/tmp/nvidia-log
     environment:
-      - POSTGRES_HOST=postgres
+      # PostgreSQL configuration for local database
+      - POSTGRES_HOST=localhost
       - POSTGRES_PORT=5432
       - POSTGRES_USER=pg
       - POSTGRES_PASSWORD=buffalo-jump
       - POSTGRES_DB=lumina
-      - CELERY_BROKER_URL=redis://:buffalo-jump@redis:6379/2
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=buffalo-jump
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-    command: uvicorn lumina.api.app:app --host 0.0.0.0 --port 8000 --reload
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  # Celery worker - Handles background jobs (scalable)
-  cw:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # No container_name - allows scaling with --scale cw=N
+      # Celery configuration - all services running in this container
+      - CELERY_BROKER_URL=redis://localhost:6379/0
+      - CELERY_RESULT_BACKEND=db+postgresql://pg:buffalo-jump@localhost:5432/lumina
+      # Enable NVIDIA MPS for multi-process GPU sharing
+      - CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
+      - CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
     deploy:
-      replicas: 6
-    runtime: nvidia
-    volumes:
-      # Same mounts as web service
-      - ${CATALOG_PATH:-~/catalogs}:/app/catalogs
-      # Mount host directories to access user files
-      - /home:/host/home:ro
-      - /mnt/synology:/host/synology:ro
-      # Mount test photos for development
-      - ./test-photos:/app/test-photos:ro
-      - ./lumina:/app/lumina
-    environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=pg
-      - POSTGRES_PASSWORD=buffalo-jump
-      - POSTGRES_DB=lumina
-      - CELERY_BROKER_URL=redis://:buffalo-jump@redis:6379/2
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=buffalo-jump
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - C_FORCE_ROOT=true  # Allow Celery to run as root (only for Docker)
-      - OLLAMA_HOST=http://ollama:11434
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    command: celery -A lumina.celery_app worker --loglevel=info --concurrency=2 --queues=celery
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-    healthcheck:
-      test: ["CMD-SHELL", "python -m lumina.health_check || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute, utility]
 
-  # Celery Flower - Web UI for monitoring Celery jobs (optional)
-  flower:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: lumina-flower
-    ports:
-      - "5555:5555"
-    environment:
-      - CELERY_BROKER_URL=redis://:buffalo-jump@redis:6379/2
-    command: celery -A lumina.celery_app flower --port=5555
-    restart: unless-stopped
-    profiles:
-      - monitoring  # Only start with: docker-compose --profile monitoring up
-
-networks:
-  default:
-    external: true
-    name: shared-infra
+volumes:
+  lumina-pgdata:

@@ -29,7 +29,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import numpy as np
 from celery import chord, group
+from PIL import Image
 from sqlalchemy import text
 from sqlalchemy.engine import Result
 
@@ -49,6 +51,161 @@ from .progress_publisher import publish_completion, publish_progress
 from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
+
+
+def compute_pixel_similarity(
+    img1_thumbnail: str, img2_thumbnail: str, thumbnail_size: int = 256
+) -> float:
+    """
+    Compute pixel-level similarity between two images using Mean Squared Error.
+
+    Returns similarity as a percentage (0-100), where 100 = identical pixels.
+    Compares thumbnails directly for speed and to handle all file formats uniformly.
+
+    Args:
+        img1_thumbnail: Path to first image thumbnail
+        img2_thumbnail: Path to second image thumbnail
+        thumbnail_size: Resize images to this size for faster comparison
+
+    Returns:
+        Similarity percentage (0-100)
+    """
+    try:
+        # Load thumbnails (already JPEGs, fast to load)
+        img1 = Image.open(img1_thumbnail).convert("RGB")
+        img2 = Image.open(img2_thumbnail).convert("RGB")
+
+        # Resize to thumbnails for speed (maintains aspect ratio)
+        img1.thumbnail((thumbnail_size, thumbnail_size), Image.Resampling.LANCZOS)
+        img2.thumbnail((thumbnail_size, thumbnail_size), Image.Resampling.LANCZOS)
+
+        # Convert to same size (pad if needed)
+        max_width = max(img1.width, img2.width)
+        max_height = max(img1.height, img2.height)
+
+        if img1.size != (max_width, max_height):
+            new_img1 = Image.new("RGB", (max_width, max_height), (0, 0, 0))
+            new_img1.paste(
+                img1, ((max_width - img1.width) // 2, (max_height - img1.height) // 2)
+            )
+            img1 = new_img1
+
+        if img2.size != (max_width, max_height):
+            new_img2 = Image.new("RGB", (max_width, max_height), (0, 0, 0))
+            new_img2.paste(
+                img2, ((max_width - img2.width) // 2, (max_height - img2.height) // 2)
+            )
+            img2 = new_img2
+
+        # Convert to numpy arrays
+        arr1 = np.array(img1, dtype=np.float32)
+        arr2 = np.array(img2, dtype=np.float32)
+
+        # Compute Mean Squared Error
+        mse = np.mean((arr1 - arr2) ** 2)
+
+        # Convert MSE to similarity percentage
+        # MSE range: 0 (identical) to 65025 (max difference for 8-bit RGB: 255²)
+        # Similarity: 100% at MSE=0, 0% at MSE=65025
+        max_mse = 255.0**2
+        similarity = max(0.0, 100.0 * (1.0 - (mse / max_mse)))
+
+        return similarity
+
+    except Exception as e:
+        logger.warning(f"Failed to compute pixel similarity: {e}")
+        return 0.0
+
+
+def verify_group_with_pixel_similarity(
+    group: List[str],
+    catalog_id: str,
+    min_similarity: float = 95.0,
+    finalizer_id: str = None,
+) -> List[List[str]]:
+    """
+    Verify a group of images using pixel-level similarity.
+
+    Splits groups that contain false positives (images that match by perceptual
+    hash but are not actually duplicates at the pixel level).
+
+    Args:
+        group: List of image IDs in the group
+        catalog_id: Catalog UUID
+        min_similarity: Minimum pixel similarity (0-100) to be considered duplicates
+        finalizer_id: Optional ID for logging
+
+    Returns:
+        List of verified subgroups (may split one group into multiple)
+    """
+    if len(group) < 2:
+        return [group] if group else []
+
+    # Load thumbnail paths for fast pixel comparison
+    with CatalogDatabase(catalog_id) as db:
+        assert db.session is not None
+        result = db.session.execute(
+            text("SELECT id, thumbnail_path FROM images WHERE id = ANY(:ids)"),
+            {"ids": group},
+        )
+        # Store thumbnail paths (already JPEGs, fast to load and compare)
+        thumbnails = {row[0]: row[1] for row in result.fetchall()}
+
+    # Build similarity matrix using pixel comparison
+    n = len(group)
+    similar_pairs: Set[Tuple[str, str]] = set()
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            img1_id = group[i]
+            img2_id = group[j]
+
+            thumb1 = thumbnails.get(img1_id)
+            thumb2 = thumbnails.get(img2_id)
+
+            if not thumb1 or not thumb2:
+                continue
+
+            # Compute pixel similarity using thumbnails (fast, handles all formats)
+            similarity = compute_pixel_similarity(thumb1, thumb2)
+
+            if similarity >= min_similarity:
+                pair = tuple(sorted([img1_id, img2_id]))
+                similar_pairs.add((pair[0], pair[1]))  # type: ignore[arg-type]
+
+    # Use Union-Find to group images based on verified similarities
+    parent = {img: img for img in group}
+
+    def find(x: str) -> str:
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> None:
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    for img1, img2 in similar_pairs:
+        union(img1, img2)
+
+    # Build verified groups
+    groups_dict: Dict[str, List[str]] = {}
+    for img in group:
+        root = find(img)
+        if root not in groups_dict:
+            groups_dict[root] = []
+        groups_dict[root].append(img)
+
+    verified_groups = [g for g in groups_dict.values() if len(g) >= 2]
+
+    if finalizer_id and len(verified_groups) != 1:
+        logger.info(
+            f"[{finalizer_id}] Pixel verification split group of {len(group)} "
+            f"into {len(verified_groups)} verified groups"
+        )
+
+    return verified_groups
 
 
 class DuplicateGroupingStrategy(str, Enum):
@@ -131,7 +288,7 @@ def _increment_job_failure_count(job_id: str) -> None:
 def duplicates_coordinator_task(
     self: CoordinatorTask,
     catalog_id: str,
-    similarity_threshold: int = 5,
+    similarity_threshold: int = 1,
     recompute_hashes: bool = False,
     batch_size: int = 1000,
 ) -> Dict[str, Any]:
@@ -144,7 +301,7 @@ def duplicates_coordinator_task(
 
     Args:
         catalog_id: UUID of the catalog
-        similarity_threshold: Maximum Hamming distance for similar images (default: 5)
+        similarity_threshold: Maximum Hamming distance for similar images (default: 1)
         recompute_hashes: Force recomputation of perceptual hashes
         batch_size: Number of images per hash batch
     """
@@ -1029,13 +1186,19 @@ def _create_duplicate_group_tags(
         )
 
 
-@app.task(bind=True, base=ProgressTask, name="duplicates_finalizer")
+@app.task(
+    bind=True,
+    base=ProgressTask,
+    name="duplicates_finalizer",
+    time_limit=7200,  # 2 hour hard limit for large duplicate sets
+    soft_time_limit=7000,  # 116 min soft limit (4 min grace for cleanup)
+)
 def duplicates_finalizer_task(
     self: ProgressTask,
     catalog_id: str,
     parent_job_id: str,
     total_images: int,
-    similarity_threshold: int = 5,
+    similarity_threshold: int = 1,
 ) -> Dict[str, Any]:
     """Finalizer that builds and saves duplicate groups from comparison pairs.
 
@@ -1103,6 +1266,47 @@ def duplicates_finalizer_task(
 
         # Assign back to groups variable for downstream processing
         groups = duplicate_groups
+
+        # PHASE 5: Pixel-level verification to filter false positives
+        self.update_progress(
+            0,
+            1,
+            f"Verifying {len(groups)} groups with pixel comparison...",
+            {"phase": "pixel_verification"},
+        )
+
+        logger.info(
+            f"[{finalizer_id}] Phase 5: Verifying {len(groups)} groups with pixel-level similarity (min 80%)"
+        )
+
+        verified_groups: list[list[str]] = []
+        original_group_count = len(groups)
+        groups_split = 0
+
+        for idx, group in enumerate(groups):
+            if idx % 100 == 0 and idx > 0:
+                logger.info(
+                    f"[{finalizer_id}] Verified {idx}/{len(groups)} groups, "
+                    f"{groups_split} split, {len(verified_groups)} verified groups created"
+                )
+
+            # Verify each group with pixel comparison (80% threshold for JPEG thumbnails)
+            subgroups = verify_group_with_pixel_similarity(
+                group, catalog_id, min_similarity=80.0, finalizer_id=finalizer_id
+            )
+
+            if len(subgroups) > 1:
+                groups_split += 1
+
+            verified_groups.extend(subgroups)
+
+        logger.info(
+            f"[{finalizer_id}] Pixel verification complete: {original_group_count} groups → "
+            f"{len(verified_groups)} verified groups ({groups_split} split due to false positives)"
+        )
+
+        # Use verified groups for downstream processing
+        groups = verified_groups
 
         # Now load pair_distances ONLY for images actually in groups (much smaller dataset)
         self.update_progress(
@@ -1654,6 +1858,90 @@ def _is_complete_clique(images: List[str], pairs_set: Set[Tuple[str, str]]) -> b
     return True
 
 
+def _fast_grouping_for_giant_components(
+    images: List[str],
+    pairs_set: Set[Tuple[str, str]],
+    pairs_distances: Dict[Tuple[str, str], int],
+    finalizer_id: str = None,
+) -> List[List[str]]:
+    """
+    Ultra-fast grouping algorithm for giant components (>20K nodes).
+
+    Uses a simple greedy approach: sort pairs by distance, greedily assign
+    to groups without expensive diameter checks. Trades precision for speed.
+
+    Completes in O(E log E + E) time vs O(V * E) for the iterative algorithm.
+    """
+    MAX_GROUP_SIZE = 20
+
+    if finalizer_id:
+        logger.info(
+            f"[{finalizer_id}] Fast grouping: Processing {len(images):,} nodes with {len(pairs_set):,} edges"
+        )
+
+    # Convert pairs_set to list with distances and sort by distance (closest first)
+    pairs_with_dist = [
+        (
+            img1,
+            img2,
+            pairs_distances.get((img1, img2), pairs_distances.get((img2, img1), 999)),
+        )
+        for img1, img2 in pairs_set
+    ]
+    pairs_with_dist.sort(key=lambda x: x[2])
+
+    if finalizer_id:
+        logger.info(
+            f"[{finalizer_id}] Sorted {len(pairs_with_dist):,} pairs by distance"
+        )
+
+    # Greedy assignment: assign each image to first compatible group
+    image_to_group: Dict[str, int] = {}
+    groups: List[List[str]] = []
+
+    for idx, (img1, img2, dist) in enumerate(pairs_with_dist):
+        if idx % 1000000 == 0 and idx > 0 and finalizer_id:
+            logger.info(
+                f"[{finalizer_id}] Processed {idx:,}/{len(pairs_with_dist):,} pairs, "
+                f"{len(groups)} groups created, {len(image_to_group)} images assigned"
+            )
+
+        group1 = image_to_group.get(img1)
+        group2 = image_to_group.get(img2)
+
+        if group1 is not None and group2 is not None:
+            # Both already in groups - skip (we don't merge groups in fast mode)
+            continue
+        elif group1 is not None:
+            # img1 in group, try to add img2
+            if len(groups[group1]) < MAX_GROUP_SIZE:
+                groups[group1].append(img2)
+                image_to_group[img2] = group1
+        elif group2 is not None:
+            # img2 in group, try to add img1
+            if len(groups[group2]) < MAX_GROUP_SIZE:
+                groups[group2].append(img1)
+                image_to_group[img1] = group2
+        else:
+            # Neither in group - create new group
+            group_id = len(groups)
+            groups.append([img1, img2])
+            image_to_group[img1] = group_id
+            image_to_group[img2] = group_id
+
+    # Filter groups to only keep those with 2+ members
+    groups = [g for g in groups if len(g) >= 2]
+
+    if finalizer_id:
+        avg_size = sum(len(g) for g in groups) / len(groups) if groups else 0
+        logger.info(
+            f"[{finalizer_id}] Fast grouping complete: {len(groups)} groups, "
+            f"avg size: {avg_size:.1f}, {len(image_to_group):,}/{len(images):,} images grouped"
+        )
+
+    return groups
+
+
 def _constrained_grouping(
     images: List[str],
     pairs_set: Set[Tuple[str, str]],
@@ -1684,8 +1972,22 @@ def _constrained_grouping(
     MAX_GROUP_SIZE = 20  # Soft limit on group size
     MAX_DIAMETER = 8  # Max distance between ANY two images in group
     SEED_WINDOW = 3  # Only add images within this distance from seed
+    MAX_CANDIDATES_PER_ITERATION = 5000  # Limit candidate checks for performance
 
     total = len(images)
+
+    # Detect giant component scenario (>20K nodes = pathological case)
+    is_giant_component = total > 20000
+
+    if is_giant_component:
+        logger.warning(
+            f"[{finalizer_id}] GIANT COMPONENT DETECTED: {total:,} nodes. "
+            f"Using ULTRA-FAST single-pass algorithm instead of iterative grouping"
+        )
+        # Use ultra-fast algorithm for giant components
+        return _fast_grouping_for_giant_components(
+            images, pairs_set, pairs_distances, finalizer_id
+        )
 
     if finalizer_id:
         logger.info(
@@ -1712,14 +2014,28 @@ def _constrained_grouping(
     remaining = set(images)
     groups = []
     processed = 0
+    iteration = 0
 
     while remaining:
+        iteration += 1
+
         # Find node with highest degree (most connections)
+        if finalizer_id and (iteration == 1 or iteration % 100 == 0):
+            logger.info(
+                f"[{finalizer_id}] Iteration {iteration}: Computing degrees for {len(remaining):,} remaining nodes..."
+            )
+
         degrees = {
             img: len([n for n, d in adj[img].items() if n in remaining])
             for img in remaining
         }
         seed = max(degrees, key=lambda x: degrees[x])
+        seed_degree = degrees[seed]
+
+        if finalizer_id and (iteration == 1 or iteration % 100 == 0):
+            logger.info(
+                f"[{finalizer_id}] Iteration {iteration}: Selected seed with degree {seed_degree}"
+            )
 
         # Start group with seed
         group = [seed]
@@ -1732,8 +2048,32 @@ def _constrained_grouping(
         # Sort by distance (closest first)
         candidates.sort(key=lambda x: x[1])
 
+        # Limit candidates for giant components to prevent iteration timeouts
+        if is_giant_component and len(candidates) > MAX_CANDIDATES_PER_ITERATION:
+            original_count = len(candidates)
+            candidates = candidates[:MAX_CANDIDATES_PER_ITERATION]
+            if finalizer_id and iteration == 1:
+                logger.info(
+                    f"[{finalizer_id}] Iteration {iteration}: Limiting candidates from {original_count:,} to {MAX_CANDIDATES_PER_ITERATION:,} for performance"
+                )
+
+        if finalizer_id and (iteration == 1 or iteration % 100 == 0):
+            logger.info(
+                f"[{finalizer_id}] Iteration {iteration}: Found {len(candidates)} candidates within distance {SEED_WINDOW}"
+            )
+
         # Greedily add candidates
+        candidates_checked = 0
         for candidate, _seed_dist in candidates:
+            candidates_checked += 1
+            if (
+                finalizer_id
+                and (iteration == 1 or iteration % 100 == 0)
+                and candidates_checked % 1000 == 0
+            ):
+                logger.info(
+                    f"[{finalizer_id}] Iteration {iteration}: Checked {candidates_checked}/{len(candidates)} candidates, group size: {len(group)}"
+                )
             if len(group) >= MAX_GROUP_SIZE:
                 break  # Hit size limit
 

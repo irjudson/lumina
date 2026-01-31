@@ -1,5 +1,5 @@
 """
-Pytest configuration and fixtures for vam_tools tests.
+Pytest configuration and fixtures for Lumina tests.
 
 This version doesn't globally patch SessionLocal, avoiding deadlock issues.
 """

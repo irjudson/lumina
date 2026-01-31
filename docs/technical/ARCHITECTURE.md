@@ -37,7 +37,7 @@ Lumina is a comprehensive photo catalog management system designed to organize 1
 ```
 
 ### Analysis Engine
-**Module**: `vam_tools/analysis/`
+**Module**: `lumina/analysis/`
 
 Responsible for scanning source directories and extracting comprehensive metadata.
 
@@ -65,7 +65,7 @@ Features:
 - Efficient querying and indexing for large datasets.
 
 ### Web Interface
-**Module**: `vam_tools/web/`
+**Module**: `lumina/web/`
 
 FastAPI-based REST API with Vue.js frontend.
 
@@ -84,15 +84,15 @@ Endpoints:
 - `/api/statistics/summary` - Catalog statistics breakdown
 
 ### CLI
-**Module**: `vam_tools/cli/`
+**Module**: `lumina/cli/`
 
 Command-line interfaces built with Click.
 
 Commands:
-- `vam-analyze` - Scan directories and build catalog
-- `vam-web` - Launch web UI server
-- `vam-organize` - Organize files based on catalog analysis
-- `vam-generate-thumbnails` - Generate thumbnails for images in the catalog
+- `lumina-analyze` - Scan directories and build catalog
+- `lumina-web` - Launch web UI server
+- `lumina-organize` - Organize files based on catalog analysis
+- `lumina-generate-thumbnails` - Generate thumbnails for images in the catalog
 
 ## Data Model
 

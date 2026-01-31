@@ -1,4 +1,4 @@
-# Test-specific Dockerfile for VAM Tools
+# Test-specific Dockerfile for Lumina
 # This builds on the base production image but adds test dependencies
 FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
 
@@ -42,7 +42,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -e ".[dev]"
 
 # Copy application code and tests
-COPY vam_tools/ ./vam_tools/
+COPY lumina/ ./lumina/
 COPY tests/ ./tests/
 
 # Create directories for catalogs and photos

@@ -1,73 +1,100 @@
 # Git Hooks
 
-This directory contains git hooks to ensure code quality before pushing.
+This directory contains git hooks to ensure code quality at different stages of development.
 
 ## Setup
 
-The hooks are automatically configured when you clone the repository. If needed, run:
+Install the hooks by creating symlinks:
 
 ```bash
-git config core.hooksPath .githooks
+ln -sf ../../.githooks/pre-commit .git/hooks/pre-commit
+ln -sf ../../.githooks/pre-push .git/hooks/pre-push
 ```
 
-## Pre-Push Hook
+## Hook Strategy
 
-The `pre-push` hook runs before every `git push` and performs:
+We use a two-stage approach to balance speed and thoroughness:
+
+### Pre-Commit Hook (Fast - ~5 seconds)
+
+Runs **before every commit** to catch code quality issues early:
 
 1. **Black formatting check** - Ensures code is formatted
 2. **isort import sorting** - Ensures imports are properly organized
 3. **flake8 linting** - Checks for code quality issues
-4. **Pytest** - Runs all tests (122 tests)
+4. **mypy type checking** - Validates type hints
 5. **Common issues check** - Checks for debugger statements, print statements in core code
 
-These checks **exactly match** what GitHub Actions CI runs, ensuring local validation before pushing.
+These are **fast checks** that don't require external services, so commits stay quick.
 
-### If Pre-Push Hook Fails
+### Pre-Push Hook (Thorough - ~30 seconds)
+
+Runs **before every push** to ensure tests pass:
+
+1. **Pytest test suite** - Runs all unit tests (parallel execution)
+2. **Docker build check** - Verifies Docker images build (only if Dockerfile changed)
+
+Tests require database services, so we run them at push time to keep commits fast while still validating before sharing code.
+
+## If Pre-Commit Hook Fails
 
 **Black formatting issues:**
 ```bash
-black vam_tools/ tests/
+black lumina/ tests/
 git add -u
-git commit --amend --no-edit
-git push
+# Hook will pass on retry
 ```
 
 **isort import sorting issues:**
 ```bash
-isort vam_tools/ tests/
+isort lumina/ tests/
 git add -u
-git commit --amend --no-edit
-git push
+# Hook will pass on retry
 ```
 
 **flake8 linting issues:**
 ```bash
 # View the issues
-flake8 vam_tools/ tests/
+flake8 lumina/ tests/
 
 # Fix them manually, then:
 git add -u
-git commit --amend --no-edit
-git push
 ```
 
-**Test failures:**
-Fix the failing tests, then:
+**mypy type checking issues:**
 ```bash
+# View the issues
+mypy lumina/
+
+# Fix them manually, then:
 git add -u
-git commit -m "Fix tests"
-git push
 ```
 
 **Debugger statements found:**
 Remove `import pdb`, `pdb.set_trace()`, or `breakpoint()` calls:
 ```bash
 # Find them
-grep -r "import pdb\|breakpoint()" vam_tools/
+grep -r "import pdb\|breakpoint()" lumina/
 
 # Remove them, then
 git add -u
-git commit --amend --no-edit
+```
+
+## If Pre-Push Hook Fails
+
+**Test failures:**
+Fix the failing tests, then:
+```bash
+git add -u
+git commit -m "fix: resolve test failures"
+git push
+```
+
+**Docker build failures:**
+Fix the Dockerfile or dependencies, then:
+```bash
+git add -u
+git commit -m "fix: resolve Docker build issues"
 git push
 ```
 
@@ -75,14 +102,16 @@ git push
 
 In emergencies only:
 ```bash
-git push --no-verify
+git commit --no-verify  # Skip pre-commit hook
+git push --no-verify    # Skip pre-push hook
 ```
 
 **⚠️ Warning:** Skipping hooks may cause CI failures on GitHub!
 
 ## Benefits
 
-- ✅ Catches issues before they reach GitHub
-- ✅ CI workflows always succeed
-- ✅ Faster feedback loop (local vs waiting for CI)
-- ✅ Prevents broken code in main branch
+- ✅ **Fast commits**: Quality checks run quickly without database dependencies
+- ✅ **Thorough pushes**: Tests validate correctness before sharing code
+- ✅ **Catches issues early**: Problems found locally, not in CI
+- ✅ **Better workflow**: Commit often (fast), push when ready (validated)
+- ✅ **CI always succeeds**: Local checks match CI checks

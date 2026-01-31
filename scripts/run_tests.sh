@@ -12,7 +12,7 @@ echo "============================================"
 echo "Running lumina tests with isolation:"
 echo "  PROJECT_ID: $PROJECT_ID"
 echo "  VENV: $VENV_PATH"
-echo "  Worker Group: vam_tools_workers (from pyproject.toml)"
+echo "  Worker Group: lumina_workers (from pyproject.toml)"
 echo "============================================"
 echo
 

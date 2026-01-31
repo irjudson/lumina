@@ -60,12 +60,12 @@ Delete test catalogs and clear jobs:
 
 ### Making Changes
 
-1. Edit code in `vam_tools/`
+1. Edit code in `lumina/`
 2. Web server auto-reloads (uvicorn --reload)
 3. Celery worker needs manual restart for task changes:
    ```bash
    # Kill and restart services
-   pkill -f "celery.*vam_tools"
+   pkill -f "celery.*lumina"
    ./run_local.sh
    ```
 
@@ -89,8 +89,8 @@ Press `Ctrl+C` in the terminal running `run_local.sh`
 
 Or manually:
 ```bash
-pkill -f "uvicorn vam_tools"
-pkill -f "celery.*vam_tools"
+pkill -f "uvicorn lumina"
+pkill -f "celery.*lumina"
 ```
 
 ## Benefits vs Docker
@@ -145,7 +145,7 @@ lumina/
 ├── logs/                # Service logs
 │   ├── web.log
 │   └── celery.log
-└── vam_tools/           # Source code
+└── lumina/             # Source code
     ├── web/            # Web API
     ├── jobs/           # Celery tasks
     └── ...

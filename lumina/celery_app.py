@@ -21,16 +21,15 @@ from .db.config import settings
 logger = logging.getLogger(__name__)
 
 # Create Celery app
-# Redis is used as message broker
-# PostgreSQL is used as result backend for chord coordination
-# Job state/results are also tracked in PostgreSQL via the Job model
-# Using database backend instead of Redis to avoid memory bloat
+# PostgreSQL is used as both message broker and result backend
+# Job state/results are also tracked in PostgreSQL via Job model
+# Using database for everything eliminates Redis dependency
 database_backend_url = settings.database_url.replace(
     "postgresql://", "db+postgresql://"
 )
 app = Celery(
     "lumina",
-    broker=settings.redis_url,
+    broker=database_backend_url,  # PostgreSQL broker instead of Redis
     backend=database_backend_url,  # PostgreSQL backend for chord support
 )
 
@@ -47,6 +46,11 @@ app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
+    # Broker settings for PostgreSQL
+    broker_connection_retry_on_startup=True,
+    broker_connection_max_retries=10,
+    broker_connection_retry=True,
+    broker_pool_limit=10,
     # Result backend settings
     result_expires=7200,  # Expire results after 2 hours to prevent database bloat
     result_backend_always_retry=True,  # Retry on database connection issues
@@ -59,7 +63,7 @@ app.conf.update(
     # With parallel batch pattern, we track progress in DB so lost tasks can be recovered
     task_acks_late=False,  # Acknowledge immediately when task starts
     task_reject_on_worker_lost=False,  # Don't requeue - we handle recovery in job_recovery.py
-    # PostgreSQL backend used for chord coordination
+    # PostgreSQL broker/backend used for all coordination
     # Results auto-expire after 2 hours, cleaned up by PostgreSQL VACUUM
     # Job state also tracked separately in Job model for long-term persistence
     # Worker settings

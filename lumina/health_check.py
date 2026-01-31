@@ -41,22 +41,27 @@ def check_celery_worker() -> bool:
         return False
 
 
-def check_redis() -> bool:
-    """Check if Redis is accessible."""
+def check_celery_broker() -> bool:
+    """Check if Celery broker (PostgreSQL) is accessible."""
     try:
-        import redis
+        from sqlalchemy import create_engine, text
 
         from lumina.db.config import settings
 
-        r = redis.from_url(
-            f"redis://:{settings.redis_password}@{settings.redis_host}:{settings.redis_port}/0",
-            socket_connect_timeout=3,
+        # Test database connection directly
+        engine = create_engine(
+            settings.database_url,
+            connect_args={"connect_timeout": 3},
         )
-        r.ping()
+
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1"))
+            result.fetchone()
+
         return True
 
     except Exception as e:
-        print(f"ERROR: Failed to connect to Redis: {e}", file=sys.stderr)
+        print(f"ERROR: Failed to connect to Celery broker: {e}", file=sys.stderr)
         return False
 
 
@@ -87,7 +92,7 @@ def check_postgres() -> bool:
 def main() -> None:
     """Run all health checks."""
     checks = [
-        ("Redis", check_redis),
+        ("Celery Broker", check_celery_broker),
         ("PostgreSQL", check_postgres),
         ("Celery Worker", check_celery_worker),
     ]

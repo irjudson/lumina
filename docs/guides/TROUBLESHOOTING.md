@@ -136,7 +136,7 @@ This guide helps you diagnose and resolve common issues with Lumina.
 
 1. **Use repair command**:
    ```bash
-   vam-analyze /path/to/catalog --repair
+   lumina-analyze /path/to/catalog --repair
    ```
 
 2. **Restore from backup**:
@@ -147,7 +147,7 @@ This guide helps you diagnose and resolve common issues with Lumina.
 
 3. **Start fresh** (creates backup first):
    ```bash
-   vam-analyze /path/to/catalog --clear -s /path/to/photos
+   lumina-analyze /path/to/catalog --clear -s /path/to/photos
    ```
 
 4. **Check disk space**:
@@ -172,7 +172,7 @@ This guide helps you diagnose and resolve common issues with Lumina.
 
 2. **Enable verbose logging**:
    ```bash
-   vam-analyze /path/to/catalog -s /path/to/photos -v
+   lumina-analyze /path/to/catalog -s /path/to/photos -v
    ```
    Look for date extraction details in output
 
@@ -204,7 +204,7 @@ This guide helps you diagnose and resolve common issues with Lumina.
 
 2. **Reduce worker count**:
    ```bash
-   vam-analyze /path/to/catalog -s /path/to/photos --workers 4
+   lumina-analyze /path/to/catalog -s /path/to/photos --workers 4
    ```
 
 3. **Check system resources**:
@@ -221,7 +221,7 @@ This guide helps you diagnose and resolve common issues with Lumina.
 
 5. **Enable verbose mode** to see where it's stuck:
    ```bash
-   vam-analyze /path/to/catalog -s /path/to/photos -v
+   lumina-analyze /path/to/catalog -s /path/to/photos -v
    ```
 
 ---

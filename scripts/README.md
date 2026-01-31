@@ -1,5 +1,7 @@
 # Lumina Scripts
 
+# Lumina Scripts
+
 Utility scripts for development, testing, and maintenance.
 
 ## Directory Structure
@@ -23,7 +25,7 @@ The scripts use three complementary approaches:
 
 1. **PROJECT_ID Environment Variable** - Uniquely identifies lumina test runs
 2. **Virtual Environment Path** - Matches only `/home/irjudson/Projects/lumina/venv/bin/pytest`
-3. **pytest-xdist Worker Group** - Configured in `pyproject.toml` as `vam_tools_workers`
+3. **pytest-xdist Worker Group** - Configured in `pyproject.toml` as `lumina_workers`
 
 ## Scripts
 

@@ -1,72 +1,41 @@
-"""
-Redis-based progress publisher for job updates.
+"""Database-based progress publisher for job updates.
 
 This module provides a simple, reliable way to publish job progress updates
-via Redis pub/sub. The frontend can either:
-1. Subscribe to Redis channel for real-time updates (WebSocket)
-2. Poll the last progress from Redis key (REST endpoint)
+via PostgreSQL database with LISTEN/NOTIFY for real-time features.
+The frontend can either:
+1. Subscribe to PostgreSQL channel for real-time updates (WebSocket)
+2. Poll the last progress from database table (REST endpoint)
 
 The key design goals are:
 - Never block: all operations have short timeouts
-- Fail gracefully: if Redis is unavailable, operations silently fail
+- Fail gracefully: if database is unavailable, operations silently fail
 - Simple REST polling: frontend can poll every 1-2s without hanging
 """
 
 import json
 import logging
-import os
 from datetime import datetime
-from types import TracebackType
-from typing import Any, Dict, Optional, Type
+from typing import Any, Dict, Optional
 
-import redis
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from ..db.connection import SessionLocal
 
 logger = logging.getLogger(__name__)
 
-# Redis connection pool (shared across all publishers)
-_redis_pool: Optional[redis.ConnectionPool] = None
-
-
-def _get_redis_url() -> str:
-    """Get Redis URL from environment or config."""
-    # Try environment first (for Docker)
-    url = os.getenv("CELERY_BROKER_URL")
-    if url:
-        return url
-
-    # Fall back to config
-    from ..db.config import settings
-
-    return settings.redis_url
-
-
-def _get_redis_pool() -> redis.ConnectionPool:
-    """Get or create the Redis connection pool."""
-    global _redis_pool
-    if _redis_pool is None:
-        redis_url = _get_redis_url()
-        _redis_pool = redis.ConnectionPool.from_url(
-            redis_url,
-            max_connections=10,
-            socket_connect_timeout=1.0,
-            socket_timeout=1.0,
-        )
-    return _redis_pool
-
-
-def _get_redis_client() -> redis.Redis:
-    """Get a Redis client from the pool."""
-    return redis.Redis(connection_pool=_get_redis_pool())
-
 
 def get_progress_channel(job_id: str) -> str:
-    """Get the Redis pub/sub channel name for a job."""
-    return f"job:{job_id}:progress"
+    """Get PostgreSQL NOTIFY channel name for a job."""
+    return f"job_progress_{job_id}"
 
 
-def get_progress_key(job_id: str) -> str:
-    """Get the Redis key for storing last progress (for polling)."""
-    return f"job:{job_id}:last_progress"
+def get_progress_table_name() -> str:
+    """Get table name for storing job progress."""
+    # Use a single table with job_id as key for simplicity
+    return "job_progress"
 
 
 def publish_progress(
@@ -78,11 +47,11 @@ def publish_progress(
     extra: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
-    Publish job progress to Redis.
+    Publish job progress to database.
 
     This:
-    1. Publishes to the job's channel (for real-time subscribers)
-    2. Sets the last progress key (for REST polling)
+    1. Stores progress in job_progress table (for polling)
+    2. Sends PostgreSQL NOTIFY (for real-time subscribers)
 
     Args:
         job_id: The Celery task ID
@@ -96,46 +65,53 @@ def publish_progress(
         True if published successfully, False otherwise
     """
     try:
-        client = _get_redis_client()
+        session = SessionLocal()
+        try:
+            # Build progress payload
+            progress_data: Dict[str, Any] = {
+                "current": current,
+                "total": total,
+                "percent": int((current / total) * 100) if total > 0 else 0,
+                "message": message,
+            }
+            if extra:
+                progress_data.update(extra)
 
-        # Build progress payload
-        progress_data: Dict[str, Any] = {
-            "current": current,
-            "total": total,
-            "percent": int((current / total) * 100) if total > 0 else 0,
-            "message": message,
-        }
-        if extra:
-            progress_data.update(extra)
+            progress: Dict[str, Any] = {
+                "job_id": job_id,
+                "status": state,
+                "progress": progress_data,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
 
-        progress: Dict[str, Any] = {
-            "job_id": job_id,
-            "status": state,
-            "progress": progress_data,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+            payload = json.dumps(progress)
 
-        payload = json.dumps(progress)
+            # Store progress in database (upsert)
+            session.execute(
+                text(
+                    "INSERT INTO job_progress (job_id, progress_data, updated_at) VALUES (:job_id, :payload, NOW()) ON CONFLICT (job_id) DO UPDATE SET progress_data = :payload, updated_at = NOW()"
+                ),
+                {"job_id": job_id, "payload": payload},
+            )
 
-        # Use pipeline for atomic operations
-        pipe = client.pipeline(transaction=False)
+            # Send NOTIFY for real-time subscribers
+            channel_name = get_progress_channel(job_id)
+            session.execute(text(f"NOTIFY {channel_name}, '{payload}'"))
 
-        # Publish to channel for real-time subscribers
-        pipe.publish(get_progress_channel(job_id), payload)
+            session.commit()
+            logger.debug(
+                f"Published progress for job {job_id}: {state} {current}/{total}"
+            )
+            return True
 
-        # Store last progress for polling (expires after 1 hour)
-        pipe.setex(get_progress_key(job_id), 3600, payload)
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
 
-        pipe.execute()
-
-        logger.debug(f"Published progress for job {job_id}: {state} {current}/{total}")
-        return True
-
-    except redis.RedisError as e:
-        logger.warning(f"Failed to publish progress for job {job_id}: {e}")
-        return False
     except Exception as e:
-        logger.warning(f"Unexpected error publishing progress for job {job_id}: {e}")
+        logger.warning(f"Failed to publish progress for job {job_id}: {e}")
         return False
 
 
@@ -146,7 +122,7 @@ def publish_completion(
     error: Optional[str] = None,
 ) -> bool:
     """
-    Publish job completion (SUCCESS or FAILURE) to Redis.
+    Publish job completion (SUCCESS or FAILURE) to database.
 
     Args:
         job_id: The Celery task ID
@@ -158,41 +134,46 @@ def publish_completion(
         True if published successfully, False otherwise
     """
     try:
-        client = _get_redis_client()
+        session = SessionLocal()
+        try:
+            # Build completion payload
+            completion: Dict[str, Any] = {
+                "job_id": job_id,
+                "status": state,
+                "timestamp": datetime.utcnow().isoformat(),
+            }
 
-        # Build completion payload
-        completion: Dict[str, Any] = {
-            "job_id": job_id,
-            "status": state,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
+            if state == "SUCCESS" and result:
+                completion["result"] = result
+            elif state == "FAILURE" and error:
+                completion["result"] = {"error": error}
 
-        if state == "SUCCESS" and result:
-            completion["result"] = result
-        elif state == "FAILURE" and error:
-            completion["result"] = {"error": error}
+            payload = json.dumps(completion)
 
-        payload = json.dumps(completion)
+            # Store final state
+            session.execute(
+                text(
+                    "INSERT INTO job_progress (job_id, progress_data, updated_at) VALUES (:job_id, :payload, NOW()) ON CONFLICT (job_id) DO UPDATE SET progress_data = :payload, updated_at = NOW()"
+                ),
+                {"job_id": job_id, "payload": payload},
+            )
 
-        # Use pipeline for atomic operations
-        pipe = client.pipeline(transaction=False)
+            # Send NOTIFY
+            channel_name = get_progress_channel(job_id)
+            session.execute(text(f"NOTIFY {channel_name}, '{payload}'"))
 
-        # Publish to channel
-        pipe.publish(get_progress_channel(job_id), payload)
+            session.commit()
+            logger.debug(f"Published completion for job {job_id}: {state}")
+            return True
 
-        # Store final state (expires after 1 hour)
-        pipe.setex(get_progress_key(job_id), 3600, payload)
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
 
-        pipe.execute()
-
-        logger.debug(f"Published completion for job {job_id}: {state}")
-        return True
-
-    except redis.RedisError as e:
-        logger.warning(f"Failed to publish completion for job {job_id}: {e}")
-        return False
     except Exception as e:
-        logger.warning(f"Unexpected error publishing completion for job {job_id}: {e}")
+        logger.warning(f"Failed to publish completion for job {job_id}: {e}")
         return False
 
 
@@ -209,27 +190,28 @@ def get_last_progress(job_id: str) -> Optional[Dict[str, Any]]:
         Progress dict if available, None otherwise
     """
     try:
-        client = _get_redis_client()
-        data = client.get(get_progress_key(job_id))
+        session = SessionLocal()
+        try:
+            result = session.execute(
+                text(
+                    f"""
+                    SELECT progress_data
+                    FROM {get_progress_table_name()}
+                    WHERE job_id = :job_id
+                    """
+                ),
+                {"job_id": job_id},
+            ).fetchone()
 
-        if data:
-            # Redis returns bytes, decode to string for json.loads
-            data_str: str
-            if isinstance(data, bytes):
-                data_str = data.decode("utf-8")
-            else:
-                data_str = str(data)
-            return json.loads(data_str)
-        return None
+            if result and result[0]:
+                return json.loads(result[0])
+            return None
 
-    except redis.RedisError as e:
-        logger.warning(f"Failed to get progress for job {job_id}: {e}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to decode progress for job {job_id}: {e}")
-        return None
+        finally:
+            session.close()
+
     except Exception as e:
-        logger.warning(f"Unexpected error getting progress for job {job_id}: {e}")
+        logger.warning(f"Failed to get progress for job {job_id}: {e}")
         return None
 
 
@@ -244,9 +226,21 @@ def clear_progress(job_id: str) -> bool:
         True if cleared successfully, False otherwise
     """
     try:
-        client = _get_redis_client()
-        client.delete(get_progress_key(job_id))
-        return True
+        session = SessionLocal()
+        try:
+            session.execute(
+                text(f"DELETE FROM {get_progress_table_name()} WHERE job_id = :job_id"),
+                {"job_id": job_id},
+            )
+            session.commit()
+            return True
+
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
     except Exception as e:
         logger.warning(f"Failed to clear progress for job {job_id}: {e}")
         return False
@@ -254,9 +248,9 @@ def clear_progress(job_id: str) -> bool:
 
 class ProgressSubscriber:
     """
-    Redis pub/sub subscriber for real-time job progress.
+    PostgreSQL LISTEN/NOTIFY subscriber for real-time job progress.
 
-    This is used by the WebSocket handler to get real-time updates.
+    This is used by WebSocket handler to get real-time updates.
     All operations have short timeouts to prevent hanging.
     """
 
@@ -270,56 +264,104 @@ class ProgressSubscriber:
         """
         self.job_id = job_id
         self.timeout = timeout
-        self._client: Optional[redis.Redis] = None
-        self._pubsub: Optional[redis.client.PubSub] = None
+        self._session: Optional[Session] = None
+        self._connection: Optional[Connection] = None
 
     def __enter__(self) -> "ProgressSubscriber":
         """Start subscription."""
-        self._client = _get_redis_client()
-        self._pubsub = self._client.pubsub()
-        self._pubsub.subscribe(get_progress_channel(self.job_id))
-        return self
+        try:
+            self._session = SessionLocal()
+            self._connection = self._session.connection()
+            self._connection.execute(
+                text(f"LISTEN {get_progress_channel(self.job_id)}")
+            )
+            return self
 
-    def __exit__(
-        self,
-        exc_type: Optional[Type[BaseException]],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[TracebackType],
-    ) -> None:
+        except Exception as e:
+            logger.warning(
+                f"Failed to subscribe to progress for job {self.job_id}: {e}"
+            )
+            self._cleanup()
+            raise
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Stop subscription."""
-        if self._pubsub:
-            try:
-                self._pubsub.unsubscribe()
-                self._pubsub.close()
-            except Exception:
-                pass
-        self._pubsub = None
-        self._client = None
+        self._cleanup()
+
+    def _cleanup(self) -> None:
+        """Clean up database connection."""
+        try:
+            if self._connection:
+                self._connection.execute(
+                    text(f"UNLISTEN {get_progress_channel(self.job_id)}")
+                )
+                self._connection.close()
+                self._connection = None
+            if self._session:
+                self._session.close()
+                self._session = None
+        except Exception:
+            pass  # Ignore cleanup errors
 
     def get_message(self) -> Optional[Dict[str, Any]]:
         """
-        Get next message from subscription (non-blocking with timeout).
+        Get the next message from subscription (non-blocking with timeout).
 
         Returns:
             Progress dict if available, None if no message or timeout
         """
-        if not self._pubsub:
+        if not self._connection:
             return None
 
         try:
-            message = self._pubsub.get_message(timeout=self.timeout)
+            # Use connection.poll() with timeout
+            self._connection.connection.poll(timeout=self.timeout)
 
-            if message and message["type"] == "message":
-                return json.loads(message["data"])
+            # Check if we have any notifications
+            if self._connection.connection.notifies:
+                notify = self._connection.connection.notifies.pop(0)
+                return json.loads(notify.payload)
 
             return None
 
-        except redis.RedisError as e:
-            logger.warning(f"Redis error getting message for job {self.job_id}: {e}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON error for job {self.job_id}: {e}")
-            return None
         except Exception as e:
-            logger.warning(f"Unexpected error for job {self.job_id}: {e}")
+            logger.warning(f"Database error getting message for job {self.job_id}: {e}")
             return None
+
+
+def cleanup_old_progress(max_age_hours: int = 24) -> int:
+    """
+    Clean up old progress data to prevent table bloat.
+
+    Args:
+        max_age_hours: Maximum age in hours for progress data
+
+    Returns:
+        Number of rows cleaned up
+    """
+    try:
+        session = SessionLocal()
+        try:
+            result = session.execute(
+                text(
+                    f"""
+                    DELETE FROM {get_progress_table_name()}
+                    WHERE updated_at < NOW() - INTERVAL '{max_age_hours} hours'
+                    """
+                )
+            )
+            session.commit()
+            cleaned = result.rowcount  # type: ignore[attr-defined]
+            if cleaned > 0:
+                logger.info(f"Cleaned up {cleaned} old progress records")
+            return cleaned
+
+        except SQLAlchemyError as e:
+            session.rollback()
+            raise e
+        finally:
+            session.close()
+
+    except Exception as e:
+        logger.warning(f"Failed to cleanup old progress data: {e}")
+        return 0

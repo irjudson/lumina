@@ -18,7 +18,7 @@ pytestmark = pytest.mark.integration
 
 
 class TestWebCLI:
-    """Tests for vam-web CLI command."""
+    """Tests for lumina-web CLI command."""
 
     def test_web_catalog_not_found(self, tmp_path: Path) -> None:
         """Test error when catalog doesn't exist."""
@@ -41,7 +41,7 @@ class TestWebCLI:
 
         assert result.exit_code == 0  # Command runs
         assert "Error: Catalog not found" in result.output
-        assert "vam-analyze" in result.output
+        assert "lumina-analyze" in result.output
 
     @patch("lumina.cli.web.uvicorn.run")
     @patch("lumina.cli.web.init_catalog")

@@ -248,13 +248,13 @@ addopts = [
     "-m", "not e2e",  # Include integration tests but skip e2e (which require docker-compose up)
 ]
 # Unique worker group name for isolation across multiple projects
-xdist_worker_class = "vam_tools_workers"
+xdist_worker_class = "lumina_workers"
 markers = [
     "integration: marks tests as integration tests requiring database (PostgreSQL)",
     "e2e: marks tests as end-to-end tests requiring full Docker stack (docker-compose up)",
 ]
-# Coverage disabled by default for speed - run with: pytest --cov=vam_tools
-# To run with coverage: pytest --cov=vam_tools --cov-report=html
+# Coverage disabled by default for speed - run with: pytest --cov=lumina
+# To run with coverage: pytest --cov=lumina --cov-report=html
 # Integration tests run by default (services always available on this machine)
 # To skip integration tests: pytest -m "not integration"
 

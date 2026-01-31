@@ -1519,8 +1519,8 @@ def start_duplicate_detection(
         raise HTTPException(status_code=404, detail="Catalog not found")
 
     # Import Celery task - use parallel coordinator for better performance
+    from ...celery_app import app as celery_app
     from ...db.models import Job
-    from ...jobs.parallel_duplicates import duplicates_coordinator_task
 
     # Generate job ID upfront (used as both DB id and Celery task id)
     job_id = str(uuid.uuid4())
@@ -1536,8 +1536,10 @@ def start_duplicate_detection(
     db.commit()
     db.refresh(job)
 
-    # Start Celery task with same ID - uses parallel coordinator pattern
-    task = duplicates_coordinator_task.apply_async(
+    # Start Celery task with same ID - use parallel coordinator pattern
+    # Use send_task with the registered task name, not the function object
+    task = celery_app.send_task(
+        "duplicates_coordinator",  # Task name as registered in @app.task(name=...)
         kwargs={
             "catalog_id": str(catalog_id),
             "similarity_threshold": similarity_threshold,
