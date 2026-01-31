@@ -21,6 +21,12 @@ if [ ! -f "/var/lib/postgresql/14/main/postgresql.conf" ]; then
     echo "local all all md5" >> /var/lib/postgresql/14/main/pg_hba.conf
 fi
 
+# Remove stale PID file from previous container run (PIDs don't persist across containers)
+if [ -f "/var/lib/postgresql/14/main/postmaster.pid" ]; then
+    echo "Removing stale postmaster.pid file..."
+    rm -f /var/lib/postgresql/14/main/postmaster.pid
+fi
+
 # Start PostgreSQL as postgres user (with verbose output for debugging)
 echo "Starting PostgreSQL..."
 su - postgres -c "/usr/lib/postgresql/14/bin/postgres -D /var/lib/postgresql/14/main" &
