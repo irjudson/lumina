@@ -30,6 +30,12 @@ services:
       # Enable NVIDIA MPS for multi-process GPU sharing
       - CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
       - CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pg -d lumina && redis-cli ping && curl -f http://localhost:8000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     deploy:
       resources:
         reservations:
