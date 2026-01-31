@@ -63,12 +63,12 @@ if [ ! -f "$PYTEST_BIN" ]; then
     PYTEST_BIN="venv/bin/pytest"
 fi
 
-# Run tests with pytest-xdist for parallel execution
-# -n 4: Use 4 parallel workers
+# Run tests serially (parallel execution can hang in git hook environment)
+# -n 0: Override pyproject.toml default of -n 4 to force serial execution
 # -m "not integration": Skip integration tests (faster)
 # --tb=short: Shorter traceback format
 # -q: Quiet mode
-if "$PYTEST_BIN" -n 4 -m "not integration" --tb=short -q 2>&1; then
+if "$PYTEST_BIN" -n 0 -m "not integration" --tb=short -q 2>&1; then
     echo -e "${GREEN}  ✓ All tests passed${NC}"
 else
     echo -e "${RED}  ✗ Tests failed${NC}"
