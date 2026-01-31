@@ -46,19 +46,8 @@ su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname
 
 echo "PostgreSQL is ready"
 
-# Start Redis
-echo "Starting Redis..."
-redis-server --daemonize yes --port 6379
-echo "Redis started"
-
 # Run database migrations if needed
 cd /app
-
-# Start Celery worker in background (using Redis as broker, PostgreSQL as result backend)
-echo "Starting Celery worker..."
-export CELERY_BROKER_URL="redis://localhost:6379/0"
-export CELERY_RESULT_BACKEND="db+postgresql://pg:buffalo-jump@localhost:5432/lumina"
-celery -A lumina.celery_app worker --loglevel=info --concurrency=4 &
 
 # Start the web application
 echo "Starting Lumina web application..."

@@ -24,14 +24,11 @@ services:
       - POSTGRES_USER=pg
       - POSTGRES_PASSWORD=buffalo-jump
       - POSTGRES_DB=lumina
-      # Celery configuration - all services running in this container
-      - CELERY_BROKER_URL=redis://localhost:6379/0
-      - CELERY_RESULT_BACKEND=db+postgresql://pg:buffalo-jump@localhost:5432/lumina
       # Enable NVIDIA MPS for multi-process GPU sharing
       - CUDA_MPS_PIPE_DIRECTORY=/tmp/nvidia-mps
       - CUDA_MPS_LOG_DIRECTORY=/tmp/nvidia-log
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U pg -d lumina && redis-cli ping && curl -f http://localhost:8000/api/jobs/health || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -U pg -d lumina && curl -f http://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

@@ -7,14 +7,13 @@ FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04 as base
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Etc/UTC
 
-# Install Python 3.11, PostgreSQL, and Redis
+# Install Python 3.11 and PostgreSQL
 RUN apt-get update && apt-get install -y \
     python3.11 \
     python3.11-dev \
     python3-pip \
     postgresql-14 \
     postgresql-client-14 \
-    redis-server \
     sudo \
     && rm -rf /var/lib/apt/lists/*
 
