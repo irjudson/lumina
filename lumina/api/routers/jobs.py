@@ -8,7 +8,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-from celery.result import AsyncResult
+# from celery.result import AsyncResult  # Removed Celery
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -21,19 +21,21 @@ from fastapi import (
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ...celery_app import app as celery_app
+# from ...celery_app import app as celery_app  # Removed Celery
 from ...db import get_db
 from ...db.catalog_schema import delete_catalog_data
 from ...db.models import Job
 from ...db.schemas import JobListResponse
-from ...jobs.job_recovery import job_recovery_check_task, job_recovery_task
-from ...jobs.parallel_bursts import burst_coordinator_task
-from ...jobs.parallel_duplicates import duplicates_coordinator_task
-from ...jobs.parallel_jobs import generic_coordinator_task
-from ...jobs.parallel_quality import quality_coordinator_task
-from ...jobs.parallel_scan import scan_coordinator_task, scan_recovery_task
-from ...jobs.reorganize import reorganize_coordinator_task
-from ...jobs.tasks import organize_catalog_task
+
+# TODO: Replace Celery tasks with FastAPI BackgroundTasks
+# from ...jobs.job_recovery import job_recovery_check_task, job_recovery_task
+# from ...jobs.parallel_bursts import burst_coordinator_task
+# from ...jobs.parallel_duplicates import duplicates_coordinator_task
+# from ...jobs.parallel_jobs import generic_coordinator_task
+# from ...jobs.parallel_quality import quality_coordinator_task
+# from ...jobs.parallel_scan import scan_coordinator_task, scan_recovery_task
+# from ...jobs.reorganize import reorganize_coordinator_task
+# from ...jobs.tasks import organize_catalog_task
 
 logger = logging.getLogger(__name__)
 
@@ -140,16 +142,8 @@ def get_failure_info(job: "Job") -> Optional[Dict[str, Any]]:
 # Map job types to their Celery tasks for restart functionality
 # All job types use the parallel coordinator pattern automatically
 JOB_TYPE_TO_TASK = {
-    "scan": scan_coordinator_task,  # Now uses coordinator pattern
-    "scan_parallel": scan_coordinator_task,  # Legacy alias
-    "analyze": generic_coordinator_task,  # Now uses generic parallel coordinator
-    "detect_duplicates": duplicates_coordinator_task,  # Now uses coordinator pattern
-    "auto_tag": generic_coordinator_task,  # Now uses generic parallel coordinator
-    "detect_bursts": burst_coordinator_task,  # Now uses coordinator pattern
-    "generate_thumbnails": generic_coordinator_task,  # Now uses generic parallel coordinator
-    "quality": quality_coordinator_task,  # Uses coordinator pattern
-    "organize": organize_catalog_task,  # TODO: Parallelize in future
-    "reorganize": reorganize_coordinator_task,  # Parallel file reorganization
+    # TODO: Implement with FastAPI BackgroundTasks
+    # Tasks temporarily disabled during Celery removal
 }
 
 # Job types that use the generic parallel coordinator

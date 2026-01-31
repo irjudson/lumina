@@ -23,7 +23,8 @@ from ..core.types import ImageRecord
 from ..db import CatalogDB as CatalogDatabase
 from ..shared.preview_cache import PreviewCache
 from .catalogs_api import router as catalogs_router
-from .jobs_api import router as jobs_router
+
+# from .jobs_api import router as jobs_router  # TODO: Refactor after Celery removal
 
 # Import burst detection task for job submission
 try:
@@ -46,6 +47,14 @@ except ImportError:
 
 app = FastAPI(title="Lumina Catalog Viewer", version="2.0.0")
 
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for container orchestration."""
+    return {"status": "healthy"}
+
+
 # Configure CORS - restricted to localhost by default for security
 # Set LUMINA_CORS_ORIGINS environment variable to customize (comma-separated)
 cors_origins_str = os.getenv(
@@ -62,7 +71,7 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(jobs_router)
+# app.include_router(jobs_router)  # TODO: Re-enable after Celery removal
 app.include_router(catalogs_router)
 
 # Mount static files directory
