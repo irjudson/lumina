@@ -24,22 +24,13 @@ from __future__ import annotations
 
 import logging
 import math
+from concurrent.futures import Future, as_completed
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-
-try:
-    from celery import chord, group
-
-    CELERY_AVAILABLE = True
-except ImportError:
-    CELERY_AVAILABLE = False
-    chord = None
-    group = None
-
 from PIL import Image
 from sqlalchemy import text
 from sqlalchemy.engine import Result
@@ -47,7 +38,7 @@ from sqlalchemy.engine import Result
 from ..db import CatalogDB as CatalogDatabase
 from ..db import get_db_context
 from ..db.models import Job
-from .celery_app import app
+from .background_jobs import get_executor
 from .coordinator import (
     CONSECUTIVE_FAILURE_THRESHOLD,
     BatchManager,
@@ -56,8 +47,6 @@ from .coordinator import (
     cancel_and_requeue_job,
     publish_job_progress,
 )
-from .progress_publisher import publish_completion, publish_progress
-from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +199,7 @@ def verify_group_with_pixel_similarity(
 
     if finalizer_id and len(verified_groups) != 1:
         logger.info(
-            f"[{finalizer_id}] Pixel verification split group of {len(group)} "
+            f"[Pixel verification split group of {len(group)} "
             f"into {len(verified_groups)} verified groups"
         )
 
@@ -248,54 +237,8 @@ class DuplicateGroupingStrategy(str, Enum):
 CURRENT_GROUPING_STRATEGY = DuplicateGroupingStrategy.STRICT_CLIQUE
 
 
-def _update_job_status(
+def duplicates_coordinator(
     job_id: str,
-    status: str,
-    result: Optional[Dict[str, Any]] = None,
-    error: Optional[str] = None,
-) -> None:
-    """Update job status directly in the database."""
-    from ..db import get_db_context
-
-    try:
-        with get_db_context() as session:
-            job = session.query(Job).filter(Job.id == job_id).first()
-            if job:
-                job.status = status
-                if result is not None:
-                    job.result = result
-                if error is not None:
-                    job.error = error
-                session.commit()
-                logger.debug(f"Updated job {job_id} status to {status}")
-    except Exception as e:
-        logger.warning(f"Failed to update job status for {job_id}: {e}")
-
-
-def _increment_job_failure_count(job_id: str) -> None:
-    """Increment the worker failure count in the job's result field."""
-    from ..db import get_db_context
-
-    try:
-        with get_db_context() as session:
-            job = session.query(Job).filter(Job.id == job_id).first()
-            if job:
-                if job.result is None:
-                    job.result = {}
-                if "worker_failures" not in job.result:
-                    job.result["worker_failures"] = 0
-                job.result["worker_failures"] += 1
-                session.commit()
-                logger.debug(
-                    f"Incremented worker_failures for job {job_id} to {job.result['worker_failures']}"
-                )
-    except Exception as e:
-        logger.warning(f"Failed to increment failure count for {job_id}: {e}")
-
-
-@app.task(bind=True, base=CoordinatorTask, name="duplicates_coordinator")
-def duplicates_coordinator_task(
-    self: CoordinatorTask,
     catalog_id: str,
     similarity_threshold: int = 1,
     recompute_hashes: bool = False,
@@ -314,13 +257,12 @@ def duplicates_coordinator_task(
         recompute_hashes: Force recomputation of perceptual hashes
         batch_size: Number of images per hash batch
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(
         f"[{parent_job_id}] Starting duplicates coordinator for catalog {catalog_id}"
     )
 
     try:
-        self.update_progress(0, 1, "Querying images...", {"phase": "init"})
 
         # Clear existing duplicate groups for this catalog
         with CatalogDatabase(catalog_id) as db:
@@ -382,21 +324,10 @@ def duplicates_coordinator_task(
         )
 
         if total_images == 0:
-            publish_completion(
-                parent_job_id,
-                "SUCCESS",
-                result={"status": "completed", "message": "No images in catalog"},
-            )
             return {"status": "completed", "message": "No images in catalog"}
 
         # Phase 1: Hash computation
         if images_needing_hash > 0:
-            self.update_progress(
-                0,
-                images_needing_hash,
-                f"Creating batches for {images_needing_hash} images...",
-                {"phase": "batching"},
-            )
 
             batch_manager = BatchManager(catalog_id, parent_job_id, "duplicates_hash")
 
@@ -410,107 +341,82 @@ def duplicates_coordinator_task(
             num_batches = len(batch_ids)
             logger.info(f"[{parent_job_id}] Created {num_batches} hash batches")
 
-            # Spawn hash workers, then comparison phase
-            self.update_progress(
-                0,
-                images_needing_hash,
-                f"Spawning {num_batches} sub-tasks for hashing...",
-                {"phase": "spawning"},
-            )
+            # Publish initial progress
+            with CatalogDatabase(catalog_id) as db:
+                publish_job_progress(
+                    parent_job_id,
+                    batch_manager.get_progress(db),
+                    f"Starting hash phase for {images_needing_hash:,} images",
+                    phase="hashing",
+                )
 
-            hash_tasks = group(
-                duplicates_hash_worker_task.s(
+            # Execute hash workers in ThreadPoolExecutor
+            executor = get_executor()
+            futures: Dict[Future, str] = {}
+
+            for batch_id in batch_ids:
+                future = executor.submit(
+                    duplicates_hash_worker,
                     catalog_id=catalog_id,
                     batch_id=batch_id,
                     parent_job_id=parent_job_id,
                 )
-                for batch_id in batch_ids
-            )
+                futures[future] = batch_id
 
-            # After hashing, run comparison phase via the callback
-            comparison_callback = duplicates_comparison_phase_task.s(
-                catalog_id=catalog_id,
-                parent_job_id=parent_job_id,
-                similarity_threshold=similarity_threshold,
-                total_images=total_images,
-            )
+            # Wait for all hash workers to complete
+            hash_results: List[Dict[str, Any]] = []
+            for future in as_completed(futures):
+                try:
+                    worker_result = future.result()
+                    hash_results.append(worker_result)
+                except Exception as e:
+                    batch_id = futures[future]
+                    logger.error(
+                        f"Hash worker for batch {batch_id} raised exception: {e}"
+                    )
+                    hash_results.append(
+                        {
+                            "batch_id": batch_id,
+                            "status": "failed",
+                            "error": str(e),
+                        }
+                    )
 
-            chord(hash_tasks)(comparison_callback)
-
-            # Start progress monitoring using generic monitor (job_batches mode)
-            from .coordinator import start_chord_progress_monitor
-
-            start_chord_progress_monitor(
-                parent_job_id=parent_job_id,
-                catalog_id=catalog_id,
-                job_type="duplicates_hash",
-                use_celery_backend=False,  # Use job_batches table for tracking
-                countdown=30,
-            )
-
-            logger.info(
-                f"[{parent_job_id}] Hash chord dispatched: {num_batches} sub-tasks"
-            )
+            logger.info(f"[{parent_job_id}] All {num_batches} hash workers complete")
         else:
-            # All images already have hashes, go straight to comparison
+            # All images already have hashes
             logger.info(
-                f"[{parent_job_id}] All images have hashes, starting comparison phase"
+                f"[{parent_job_id}] All images have hashes, skipping hash phase"
             )
-            duplicates_comparison_phase_task.delay(
-                [],  # No hash results needed
-                catalog_id=catalog_id,
-                parent_job_id=parent_job_id,
-                similarity_threshold=similarity_threshold,
-                total_images=total_images,
-            )
+            hash_results = []
 
-        # Set job to STARTED state - workers are now processing
-        # The finalizer will update to SUCCESS when all batches complete
-        _update_job_status(
-            parent_job_id,
-            "STARTED",
-            result={
-                "status": "processing",
-                "total_images": total_images,
-                "images_to_hash": images_needing_hash,
-                "message": f"Processing {total_images} images",
-            },
+        # Run comparison phase inline (was Celery callback)
+        final_result = duplicates_comparison_phase(
+            hash_results=hash_results,
+            catalog_id=catalog_id,
+            parent_job_id=parent_job_id,
+            similarity_threshold=similarity_threshold,
+            total_images=total_images,
         )
 
-        publish_progress(
-            parent_job_id,
-            "PROGRESS",
-            current=0,
-            total=total_images,
-            message=f"Processing {total_images} images (hashing phase)",
-            extra={"phase": "hashing", "images_to_hash": images_needing_hash},
-        )
-
-        return {
-            "status": "dispatched",
-            "catalog_id": catalog_id,
-            "total_images": total_images,
-            "images_to_hash": images_needing_hash,
-            "message": f"Processing {total_images} images",
-        }
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
-        publish_completion(parent_job_id, "FAILURE", error=str(e))
         raise
 
 
-@app.task(bind=True, name="duplicates_hash_worker")
-def duplicates_hash_worker_task(
-    self: Any,
+def duplicates_hash_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
 ) -> Dict[str, Any]:
     """Worker task that computes perceptual hashes for a batch of images."""
+    import threading
+
     from ..analysis.perceptual_hash import ahash, dhash, whash
 
-    worker_id = self.request.id or "unknown"
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting hash worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "duplicates_hash")
@@ -622,9 +528,7 @@ def duplicates_hash_worker_task(
         return {"batch_id": batch_id, "status": "failed", "error": str(e)}
 
 
-@app.task(bind=True, base=ProgressTask, name="duplicates_comparison_phase")
-def duplicates_comparison_phase_task(
-    self: ProgressTask,
+def duplicates_comparison_phase(
     hash_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
@@ -637,8 +541,8 @@ def duplicates_comparison_phase_task(
     This loads all image hashes and divides comparison work into blocks.
     Each comparison worker handles a block pair.
     """
-    task_id = self.request.id or "unknown"
-    logger.info(f"[{task_id}] Starting comparison phase for job {parent_job_id}")
+    # Comparison phase logging uses parent_job_id
+    logger.info(f"[{parent_job_id}] Starting comparison phase for job {parent_job_id}")
 
     try:
         # Report hash phase completion
@@ -653,11 +557,7 @@ def duplicates_comparison_phase_task(
             if r.get("status") == "completed"
         )
         logger.info(
-            f"[{task_id}] Hash phase complete: {hash_success} success, {hash_errors} errors"
-        )
-
-        self.update_progress(
-            0, 1, "Loading image hashes...", {"phase": "comparison_init"}
+            f"[{parent_job_id}] Hash phase complete: {hash_success} success, {hash_errors} errors"
         )
 
         # Load all image hashes from database (filter out problematic images and bursts)
@@ -699,7 +599,7 @@ def duplicates_comparison_phase_task(
 
         num_images = len(images)
         logger.info(
-            f"[{task_id}] Loaded {num_images} images with valid hashes "
+            f"[{parent_job_id}] Loaded {num_images} images with valid hashes "
             f"(filtered: videos, null hashes, zero hashes)"
         )
 
@@ -713,13 +613,11 @@ def duplicates_comparison_phase_task(
                 "total_duplicates": 0,
                 "message": "Not enough images for comparison",
             }
-            publish_completion(parent_job_id, "SUCCESS", result=final_result)
-            _update_job_status(parent_job_id, "SUCCESS", result=final_result)
             return final_result
 
         # Permanent duplicate_pairs table exists (created by migration)
         # No longer need to create temp table
-        logger.info(f"[{task_id}] Using permanent duplicate_pairs table")
+        logger.info(f"[{parent_job_id}] Using permanent duplicate_pairs table")
 
         # Divide images into blocks for parallel comparison
         # Each block pair (i,j) will be compared by a worker
@@ -738,96 +636,84 @@ def duplicates_comparison_phase_task(
 
         total_block_pairs = len(block_pairs)
         logger.info(
-            f"[{task_id}] Generated {total_block_pairs} block pairs from {num_blocks} blocks"
+            f"[{parent_job_id}] Generated {total_block_pairs} block pairs from {num_blocks} blocks"
         )
 
-        # Batch block pairs to avoid creating too many Celery tasks
+        # Batch block pairs for parallel execution
         # Each worker will process multiple block pairs
-        pairs_per_batch = 50  # Process 50 block pairs per worker (reduced from 100 to prevent timeouts)
-        comparison_tasks = []
+        pairs_per_batch = 50  # Process 50 block pairs per worker
+        comparison_batches = []
 
         for batch_start in range(0, total_block_pairs, pairs_per_batch):
             batch_end = min(batch_start + pairs_per_batch, total_block_pairs)
             batch = block_pairs[batch_start:batch_end]
-
-            comparison_tasks.append(
-                duplicates_compare_worker_task.s(
-                    catalog_id=catalog_id,
-                    parent_job_id=parent_job_id,
-                    block_pairs=batch,  # Pass list of (i,j) tuples
-                    block_size=block_size,
-                    similarity_threshold=similarity_threshold,
-                    images=images,  # Pass all images - workers will slice
-                )
+            comparison_batches.append(
+                {
+                    "catalog_id": catalog_id,
+                    "parent_job_id": parent_job_id,
+                    "block_pairs": batch,
+                    "block_size": block_size,
+                    "similarity_threshold": similarity_threshold,
+                    "images": images,
+                }
             )
 
-        num_worker_tasks = len(comparison_tasks)
+        num_worker_tasks = len(comparison_batches)
         logger.info(
-            f"[{task_id}] Creating {num_worker_tasks} comparison workers for {total_block_pairs} block pairs ({pairs_per_batch} pairs/worker)"
+            f"[{parent_job_id}] Creating {num_worker_tasks} comparison workers for {total_block_pairs} block pairs ({pairs_per_batch} pairs/worker)"
         )
 
-        publish_progress(
-            parent_job_id,
-            "PROGRESS",
-            current=hash_success,
-            total=total_images,
-            message=f"Starting comparison phase ({num_worker_tasks} workers, {total_block_pairs} block pairs)",
-            extra={
-                "phase": "comparing",
-                "worker_tasks": num_worker_tasks,
-                "block_pairs": total_block_pairs,
-            },
+        # Execute comparison workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: List[Future] = []
+
+        for batch_params in comparison_batches:
+            future = executor.submit(
+                duplicates_compare_worker,
+                catalog_id=batch_params["catalog_id"],  # type: ignore[arg-type]
+                parent_job_id=batch_params["parent_job_id"],  # type: ignore[arg-type]
+                block_pairs=batch_params["block_pairs"],  # type: ignore[arg-type]
+                block_size=batch_params["block_size"],  # type: ignore[arg-type]
+                similarity_threshold=batch_params["similarity_threshold"],  # type: ignore[arg-type]
+                images=batch_params["images"],  # type: ignore[arg-type]
+            )
+            futures.append(future)
+
+        # Wait for all comparison workers to complete
+        compare_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                worker_result = future.result()
+                compare_results.append(worker_result)
+            except Exception as e:
+                logger.error(f"Comparison worker raised exception: {e}")
+                compare_results.append(
+                    {
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        logger.info(
+            f"[{parent_job_id}] All {num_worker_tasks} comparison workers complete, running finalizer"
         )
 
-        # Launch comparison workers with finalizer
-        # Use .si() (immutable signature) to prevent passing worker results through Redis
-        # Worker failures are tracked in the job record instead
-        finalizer = duplicates_finalizer_task.si(
+        # Run finalizer inline
+        final_result = duplicates_finalizer(
             catalog_id=catalog_id,
             parent_job_id=parent_job_id,
             total_images=num_images,
             similarity_threshold=similarity_threshold,
         )
 
-        # Store worker task IDs for progress tracking
-        chord_result = chord(group(comparison_tasks))(finalizer)
-
-        # Start progress monitoring task using generic monitor
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="duplicate_comparison",
-            expected_workers=num_worker_tasks,
-            use_celery_backend=True,
-            comparison_start_time=datetime.utcnow().isoformat(),
-            countdown=30,
-        )
-
-        logger.info(
-            f"[{task_id}] Comparison chord dispatched: {num_worker_tasks} workers → finalizer"
-        )
-
-        return {
-            "status": "comparison_dispatched",
-            "hash_success": hash_success,
-            "hash_errors": hash_errors,
-            "images_with_hashes": num_images,
-            "comparison_tasks": num_worker_tasks,
-            "block_pairs": total_block_pairs,
-        }
+        return final_result
 
     except Exception as e:
-        logger.error(f"[{task_id}] Comparison phase failed: {e}", exc_info=True)
-        publish_completion(parent_job_id, "FAILURE", error=str(e))
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        logger.error(f"[{parent_job_id}] Comparison phase failed: {e}", exc_info=True)
         raise
 
 
-@app.task(bind=True, name="duplicates_compare_worker")
-def duplicates_compare_worker_task(
-    self: Any,
+def duplicates_compare_worker(
     catalog_id: str,
     parent_job_id: str,
     block_pairs: List[tuple],
@@ -845,24 +731,11 @@ def duplicates_compare_worker_task(
     - If i == j: Compare all pairs within block i
     - If i != j: Compare all images in block i against all in block j
     """
-    worker_id = self.request.id or "unknown"
+    import threading
+
+    worker_id = f"thread-{threading.get_ident()}"
     num_pairs = len(block_pairs)
     logger.info(f"[{worker_id}] Starting comparison for {num_pairs} block pairs")
-
-    # Publish progress at start
-    try:
-        from .progress_publisher import publish_progress
-
-        publish_progress(
-            job_id=parent_job_id,
-            state="PROGRESS",
-            current=0,
-            total=num_pairs,
-            message=f"Starting comparison batch ({num_pairs} block pairs)...",
-            extra={"phase": "comparing", "num_pairs": num_pairs},
-        )
-    except Exception:
-        pass  # Non-critical
 
     try:
         # Instead of collecting ALL pairs in memory, write them to database in batches
@@ -1021,26 +894,6 @@ def duplicates_compare_worker_task(
 
             pairs_processed += 1
 
-            # Publish progress every 10 block pairs
-            if pairs_processed % 10 == 0:
-                try:
-                    from .progress_publisher import publish_progress
-
-                    publish_progress(
-                        job_id=parent_job_id,
-                        state="PROGRESS",
-                        current=pairs_processed,
-                        total=num_pairs,
-                        message=f"Comparing batch: {pairs_processed}/{num_pairs} block pairs done, {pairs_found} duplicates found",
-                        extra={
-                            "phase": "comparing",
-                            "pairs_processed": pairs_processed,
-                            "pairs_found": pairs_found,
-                        },
-                    )
-                except Exception:
-                    pass
-
         # Flush any remaining pairs to database
         _flush_pairs_to_db()
 
@@ -1049,24 +902,6 @@ def duplicates_compare_worker_task(
         )
 
         # Publish final progress
-        try:
-            from .progress_publisher import publish_progress
-
-            publish_progress(
-                job_id=parent_job_id,
-                state="PROGRESS",
-                current=num_pairs,
-                total=num_pairs,
-                message=f"Batch complete: {num_pairs} block pairs, {pairs_found} duplicates found",
-                extra={
-                    "phase": "comparing",
-                    "pairs_processed": num_pairs,
-                    "pairs_found": pairs_found,
-                },
-            )
-        except Exception as e:
-            logger.debug(f"Failed to publish comparison progress: {e}")
-
         # Return only counts, not the actual pairs (to avoid Redis size limits)
         return {
             "status": "completed",
@@ -1087,11 +922,6 @@ def duplicates_compare_worker_task(
 
     except Exception as e:
         logger.error(f"[{worker_id}] Comparison worker failed: {e}", exc_info=True)
-        # Increment failure counter in job record
-        try:
-            _increment_job_failure_count(parent_job_id)
-        except Exception as count_error:
-            logger.warning(f"Failed to increment failure count: {count_error}")
         return {
             "status": "failed",
             "error": str(e),
@@ -1195,15 +1025,7 @@ def _create_duplicate_group_tags(
         )
 
 
-@app.task(
-    bind=True,
-    base=ProgressTask,
-    name="duplicates_finalizer",
-    time_limit=7200,  # 2 hour hard limit for large duplicate sets
-    soft_time_limit=7000,  # 116 min soft limit (4 min grace for cleanup)
-)
-def duplicates_finalizer_task(
-    self: ProgressTask,
+def duplicates_finalizer(
     catalog_id: str,
     parent_job_id: str,
     total_images: int,
@@ -1217,13 +1039,10 @@ def duplicates_finalizer_task(
     Note: Worker results are NOT passed to this task to avoid Redis memory issues.
     Failure counts are tracked in the job's result field instead.
     """
-    finalizer_id = self.request.id or "unknown"
-    logger.info(f"[{finalizer_id}] Starting finalizer for job {parent_job_id}")
+    # Finalizer logging uses parent_job_id
+    logger.info(f"[{parent_job_id}] Starting finalizer for job {parent_job_id}")
 
     try:
-        self.update_progress(
-            0, 1, "Counting duplicate pairs...", {"phase": "finalizing"}
-        )
 
         # First, count total pairs without loading into memory
         total_pairs = 0
@@ -1240,7 +1059,7 @@ def duplicates_finalizer_task(
             )
             total_pairs = count_result.scalar() or 0
 
-        logger.info(f"[{finalizer_id}] Found {total_pairs} duplicate pairs to process")
+        logger.info(f"[{parent_job_id}] Found {total_pairs} duplicate pairs to process")
 
         if total_pairs == 0:
             final_result = {
@@ -1250,42 +1069,32 @@ def duplicates_finalizer_task(
                 "duplicate_groups": 0,
                 "total_duplicates": 0,
             }
-            publish_completion(parent_job_id, "SUCCESS", result=final_result)
-            _update_job_status(parent_job_id, "SUCCESS", result=final_result)
             return final_result
 
         # ALWAYS use database-backed incremental grouping to avoid OOM
         # Never build full graph in memory regardless of dataset size
         logger.info(
-            f"[{finalizer_id}] Using database-backed incremental grouping for {total_pairs:,} pairs"
+            f"[{parent_job_id}] Using database-backed incremental grouping for {total_pairs:,} pairs"
         )
-        groups = _build_groups_incrementally_from_db(
+        groups = _build_groups_incrementally_from_db(  # type: ignore[call-arg]
             catalog_id=catalog_id,
             parent_job_id=parent_job_id,
             total_pairs=total_pairs,
-            finalizer_id=finalizer_id,
-            progress_callback=self.update_progress,
         )
         # Convert sets to lists for consistency
         duplicate_groups = [list(group) for group in groups]
 
         logger.info(
-            f"[{finalizer_id}] Built {len(duplicate_groups)} groups from {total_pairs:,} pairs"
+            f"[{parent_job_id}] Built {len(duplicate_groups)} groups from {total_pairs:,} pairs"
         )
 
         # Assign back to groups variable for downstream processing
         groups = duplicate_groups
 
         # PHASE 5: Pixel-level verification to filter false positives
-        self.update_progress(
-            0,
-            1,
-            f"Verifying {len(groups)} groups with pixel comparison...",
-            {"phase": "pixel_verification"},
-        )
 
         logger.info(
-            f"[{finalizer_id}] Phase 5: Verifying {len(groups)} groups with pixel-level similarity (min 80%)"
+            f"[{parent_job_id}] Phase 5: Verifying {len(groups)} groups with pixel-level similarity (min 80%)"
         )
 
         verified_groups: list[list[str]] = []
@@ -1295,13 +1104,13 @@ def duplicates_finalizer_task(
         for idx, group in enumerate(groups):
             if idx % 100 == 0 and idx > 0:
                 logger.info(
-                    f"[{finalizer_id}] Verified {idx}/{len(groups)} groups, "
+                    f"[{parent_job_id}] Verified {idx}/{len(groups)} groups, "
                     f"{groups_split} split, {len(verified_groups)} verified groups created"
                 )
 
             # Verify each group with pixel comparison (80% threshold for JPEG thumbnails)
             subgroups = verify_group_with_pixel_similarity(
-                group, catalog_id, min_similarity=80.0, finalizer_id=finalizer_id
+                group, catalog_id, min_similarity=80.0
             )
 
             if len(subgroups) > 1:
@@ -1310,7 +1119,7 @@ def duplicates_finalizer_task(
             verified_groups.extend(subgroups)
 
         logger.info(
-            f"[{finalizer_id}] Pixel verification complete: {original_group_count} groups → "
+            f"[{parent_job_id}] Pixel verification complete: {original_group_count} groups → "
             f"{len(verified_groups)} verified groups ({groups_split} split due to false positives)"
         )
 
@@ -1318,12 +1127,6 @@ def duplicates_finalizer_task(
         groups = verified_groups
 
         # Now load pair_distances ONLY for images actually in groups (much smaller dataset)
-        self.update_progress(
-            0,
-            1,
-            "Loading distances for grouped images only...",
-            {"phase": "loading_distances"},
-        )
 
         # Get set of all images in groups
         images_in_groups = set()
@@ -1331,7 +1134,7 @@ def duplicates_finalizer_task(
             images_in_groups.update(img_group)
 
         logger.info(
-            f"[{finalizer_id}] Loading distances for {len(images_in_groups)} images in {len(groups)} groups"
+            f"[{parent_job_id}] Loading distances for {len(images_in_groups)} images in {len(groups)} groups"
         )
 
         pair_distances: Dict[tuple, int] = {}
@@ -1364,18 +1167,14 @@ def duplicates_finalizer_task(
                     pair_distances[key] = dist
 
         logger.info(
-            f"[{finalizer_id}] Loaded {len(pair_distances)} pair distances for similarity scoring"
+            f"[{parent_job_id}] Loaded {len(pair_distances)} pair distances for similarity scoring"
         )
         group_sizes = [len(g) for g in groups]
         logger.info(
-            f"[{finalizer_id}] Built {len(groups)} duplicate groups. "
+            f"[{parent_job_id}] Built {len(groups)} duplicate groups. "
             f"Sizes: min={min(group_sizes) if group_sizes else 0}, "
             f"max={max(group_sizes) if group_sizes else 0}, "
             f"avg={sum(group_sizes) / len(group_sizes) if group_sizes else 0:.1f}"
-        )
-
-        self.update_progress(
-            0, 1, f"Saving {len(groups)} duplicate groups...", {"phase": "saving"}
         )
 
         # Load image quality scores for selecting primary
@@ -1415,7 +1214,7 @@ def duplicates_finalizer_task(
                 # Log progress for large groups
                 if len(group_images) > 1000:
                     logger.info(
-                        f"[{finalizer_id}] Processing large group {groups_processed}/{len(groups)} "
+                        f"[{parent_job_id}] Processing large group {groups_processed}/{len(groups)} "
                         f"with {len(group_images)} images"
                     )
 
@@ -1513,7 +1312,7 @@ def duplicates_finalizer_task(
                 _create_duplicate_group_tags(catalog_id, groups_data_for_tags)
             except Exception as e:
                 logger.warning(
-                    f"[{finalizer_id}] Failed to create duplicate group tags: {e}"
+                    f"[{parent_job_id}] Failed to create duplicate group tags: {e}"
                 )
 
         # Get worker failure count from job record (tracked in database, not passed through Redis)
@@ -1526,12 +1325,12 @@ def duplicates_finalizer_task(
                 if job and job.result and "worker_failures" in job.result:
                     failed_comparisons = job.result["worker_failures"]
         except Exception as e:
-            logger.warning(f"[{finalizer_id}] Failed to get worker failure count: {e}")
+            logger.warning(f"[{parent_job_id}] Failed to get worker failure count: {e}")
 
         # If there were too many failed comparisons, auto-requeue to continue
         if failed_comparisons >= CONSECUTIVE_FAILURE_THRESHOLD:
             logger.warning(
-                f"[{finalizer_id}] {failed_comparisons} comparisons failed, auto-requeuing continuation"
+                f"[{parent_job_id}] {failed_comparisons} comparisons failed, auto-requeuing continuation"
             )
 
             cancel_and_requeue_job(
@@ -1570,31 +1369,19 @@ def duplicates_finalizer_task(
             "failed_comparisons": failed_comparisons,
         }
 
-        publish_completion(parent_job_id, "SUCCESS", result=final_result)
-        _update_job_status(parent_job_id, "SUCCESS", result=final_result)
-
-        self.update_progress(
-            total_images,
-            total_images,
-            f"Complete: {len(groups)} groups, {total_duplicates} duplicates",
-            {"phase": "complete"},
-        )
-
         logger.info(
-            f"[{finalizer_id}] Duplicate detection complete: {len(groups)} groups, {total_duplicates} duplicates"
+            f"[{parent_job_id}] Duplicate detection complete: {len(groups)} groups, {total_duplicates} duplicates"
         )
 
         # Pairs are now stored permanently - no cleanup needed
         logger.info(
-            f"[{finalizer_id}] Duplicate pairs stored permanently in duplicate_pairs table"
+            f"[{parent_job_id}] Duplicate pairs stored permanently in duplicate_pairs table"
         )
 
         return final_result
 
     except Exception as e:
-        logger.error(f"[{finalizer_id}] Finalizer failed: {e}", exc_info=True)
-        publish_completion(parent_job_id, "FAILURE", error=str(e))
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        logger.error(f"[{parent_job_id}] Finalizer failed: {e}", exc_info=True)
         raise
 
 
@@ -1643,13 +1430,13 @@ def _build_groups_incrementally_from_db(
         List of image ID lists, each representing a duplicate group
     """
     logger.info(
-        f"[{finalizer_id}] Using efficient Union-Find grouping for {total_pairs:,} pairs"
+        f"[{parent_job_id}] Using efficient Union-Find grouping for {total_pairs:,} pairs"
     )
 
     # Phase 1: Load all pairs WITH DISTANCES into memory
     # 10M pairs × ~110 bytes each ≈ 1.1GB (acceptable)
     logger.info(
-        f"[{finalizer_id}] Phase 1: Loading pairs with distances from database..."
+        f"[{parent_job_id}] Phase 1: Loading pairs with distances from database..."
     )
 
     pairs_set = set()
@@ -1679,7 +1466,7 @@ def _build_groups_incrementally_from_db(
             # Also store reverse for lookup
             pairs_distances[(img2, img1)] = distance
 
-    logger.info(f"[{finalizer_id}] Loaded {len(pairs_list):,} pairs into memory")
+    logger.info(f"[{parent_job_id}] Loaded {len(pairs_list):,} pairs into memory")
 
     if progress_callback:
         progress_callback(
@@ -1694,7 +1481,7 @@ def _build_groups_incrementally_from_db(
     CONTINUITY_GAP = 2  # Detect break if distance jumps by more than this
 
     logger.info(
-        f"[{finalizer_id}] Phase 2: Segmenting by hash continuity (gap threshold: {CONTINUITY_GAP})..."
+        f"[{parent_job_id}] Phase 2: Segmenting by hash continuity (gap threshold: {CONTINUITY_GAP})..."
     )
 
     segments: List[List[Tuple[str, str]]] = (
@@ -1719,7 +1506,7 @@ def _build_groups_incrementally_from_db(
         # Progress every 1M pairs
         if (i + 1) % 1_000_000 == 0:
             logger.info(
-                f"[{finalizer_id}] Continuity segmentation: {i + 1:,} / {total_pairs:,} pairs, "
+                f"[{parent_job_id}] Continuity segmentation: {i + 1:,} / {total_pairs:,} pairs, "
                 f"{len(segments)} segments found"
             )
 
@@ -1728,11 +1515,11 @@ def _build_groups_incrementally_from_db(
         segments.append(current_segment)
 
     logger.info(
-        f"[{finalizer_id}] Continuity segmentation complete: {len(segments)} segments from {total_pairs:,} pairs"
+        f"[{parent_job_id}] Continuity segmentation complete: {len(segments)} segments from {total_pairs:,} pairs"
     )
 
     # Phase 3: Validate each segment with Union-Find
-    logger.info(f"[{finalizer_id}] Phase 3: Validating segments with Union-Find...")
+    logger.info(f"[{parent_job_id}] Phase 3: Validating segments with Union-Find...")
 
     components: Dict[str, List[str]] = {}  # Final components after validation
     total_validated = 0
@@ -1786,12 +1573,12 @@ def _build_groups_incrementally_from_db(
         # Progress every 100 segments
         if (seg_idx + 1) % 100 == 0:
             logger.info(
-                f"[{finalizer_id}] Validated {seg_idx + 1:,} / {len(segments)} segments, "
+                f"[{parent_job_id}] Validated {seg_idx + 1:,} / {len(segments)} segments, "
                 f"{len(components)} components found"
             )
 
     logger.info(
-        f"[{finalizer_id}] Validation complete: {len(components)} components from "
+        f"[{parent_job_id}] Validation complete: {len(components)} components from "
         f"{len(segments)} segments ({total_validated:,} images)"
     )
 
@@ -1804,7 +1591,7 @@ def _build_groups_incrementally_from_db(
         )
 
     # Phase 4: Validate and decompose cliques
-    logger.info(f"[{finalizer_id}] Phase 4: Validating/decomposing cliques...")
+    logger.info(f"[{parent_job_id}] Phase 4: Validating/decomposing cliques...")
 
     cliques: List[List[str]] = []
     for i, (_root, images) in enumerate(components.items()):
@@ -1820,7 +1607,7 @@ def _build_groups_incrementally_from_db(
                 {"phase": "clique_validation"},
             )
             logger.info(
-                f"[{finalizer_id}] Clique validation: {i:,} / {len(components):,} components, "
+                f"[{parent_job_id}] Clique validation: {i:,} / {len(components):,} components, "
                 f"{len(cliques)} cliques found"
             )
 
@@ -1832,7 +1619,7 @@ def _build_groups_incrementally_from_db(
         cliques.extend(sub_cliques)
 
     logger.info(
-        f"[{finalizer_id}] Clique decomposition complete: {len(cliques)} groups from "
+        f"[{parent_job_id}] Clique decomposition complete: {len(cliques)} groups from "
         f"{total_pairs:,} pairs across {len(components)} components"
     )
 
@@ -1885,7 +1672,7 @@ def _fast_grouping_for_giant_components(
 
     if finalizer_id:
         logger.info(
-            f"[{finalizer_id}] Fast grouping: Processing {len(images):,} nodes with {len(pairs_set):,} edges"
+            f"[Fast grouping: Processing {len(images):,} nodes with {len(pairs_set):,} edges"
         )
 
     # Convert pairs_set to list with distances and sort by distance (closest first)
@@ -1900,9 +1687,7 @@ def _fast_grouping_for_giant_components(
     pairs_with_dist.sort(key=lambda x: x[2])
 
     if finalizer_id:
-        logger.info(
-            f"[{finalizer_id}] Sorted {len(pairs_with_dist):,} pairs by distance"
-        )
+        logger.info(f"[Sorted {len(pairs_with_dist):,} pairs by distance")
 
     # Greedy assignment: assign each image to first compatible group
     image_to_group: Dict[str, int] = {}
@@ -1911,7 +1696,7 @@ def _fast_grouping_for_giant_components(
     for idx, (img1, img2, dist) in enumerate(pairs_with_dist):
         if idx % 1000000 == 0 and idx > 0 and finalizer_id:
             logger.info(
-                f"[{finalizer_id}] Processed {idx:,}/{len(pairs_with_dist):,} pairs, "
+                f"[Processed {idx:,}/{len(pairs_with_dist):,} pairs, "
                 f"{len(groups)} groups created, {len(image_to_group)} images assigned"
             )
 
@@ -1944,7 +1729,7 @@ def _fast_grouping_for_giant_components(
     if finalizer_id:
         avg_size = sum(len(g) for g in groups) / len(groups) if groups else 0
         logger.info(
-            f"[{finalizer_id}] Fast grouping complete: {len(groups)} groups, "
+            f"[Fast grouping complete: {len(groups)} groups, "
             f"avg size: {avg_size:.1f}, {len(image_to_group):,}/{len(images):,} images grouped"
         )
 
@@ -1990,7 +1775,7 @@ def _constrained_grouping(
 
     if is_giant_component:
         logger.warning(
-            f"[{finalizer_id}] GIANT COMPONENT DETECTED: {total:,} nodes. "
+            f"[GIANT COMPONENT DETECTED: {total:,} nodes. "
             f"Using ULTRA-FAST single-pass algorithm instead of iterative grouping"
         )
         # Use ultra-fast algorithm for giant components
@@ -2000,7 +1785,7 @@ def _constrained_grouping(
 
     if finalizer_id:
         logger.info(
-            f"[{finalizer_id}] Building constrained groups for {total:,} nodes "
+            f"[Building constrained groups for {total:,} nodes "
             f"(max_size={MAX_GROUP_SIZE}, max_diameter={MAX_DIAMETER}, seed_window={SEED_WINDOW})..."
         )
 
@@ -2018,7 +1803,7 @@ def _constrained_grouping(
 
     if finalizer_id:
         total_edges = sum(len(neighbors) for neighbors in adj.values()) // 2
-        logger.info(f"[{finalizer_id}] Adjacency built: {total_edges:,} edges")
+        logger.info(f"[Adjacency built: {total_edges:,} edges")
 
     remaining = set(images)
     groups = []
@@ -2031,7 +1816,7 @@ def _constrained_grouping(
         # Find node with highest degree (most connections)
         if finalizer_id and (iteration == 1 or iteration % 100 == 0):
             logger.info(
-                f"[{finalizer_id}] Iteration {iteration}: Computing degrees for {len(remaining):,} remaining nodes..."
+                f"[Iteration {iteration}: Computing degrees for {len(remaining):,} remaining nodes..."
             )
 
         degrees = {
@@ -2043,7 +1828,7 @@ def _constrained_grouping(
 
         if finalizer_id and (iteration == 1 or iteration % 100 == 0):
             logger.info(
-                f"[{finalizer_id}] Iteration {iteration}: Selected seed with degree {seed_degree}"
+                f"[Iteration {iteration}: Selected seed with degree {seed_degree}"
             )
 
         # Start group with seed
@@ -2063,12 +1848,12 @@ def _constrained_grouping(
             candidates = candidates[:MAX_CANDIDATES_PER_ITERATION]
             if finalizer_id and iteration == 1:
                 logger.info(
-                    f"[{finalizer_id}] Iteration {iteration}: Limiting candidates from {original_count:,} to {MAX_CANDIDATES_PER_ITERATION:,} for performance"
+                    f"[Iteration {iteration}: Limiting candidates from {original_count:,} to {MAX_CANDIDATES_PER_ITERATION:,} for performance"
                 )
 
         if finalizer_id and (iteration == 1 or iteration % 100 == 0):
             logger.info(
-                f"[{finalizer_id}] Iteration {iteration}: Found {len(candidates)} candidates within distance {SEED_WINDOW}"
+                f"[Iteration {iteration}: Found {len(candidates)} candidates within distance {SEED_WINDOW}"
             )
 
         # Greedily add candidates
@@ -2081,7 +1866,7 @@ def _constrained_grouping(
                 and candidates_checked % 1000 == 0
             ):
                 logger.info(
-                    f"[{finalizer_id}] Iteration {iteration}: Checked {candidates_checked}/{len(candidates)} candidates, group size: {len(group)}"
+                    f"[Iteration {iteration}: Checked {candidates_checked}/{len(candidates)} candidates, group size: {len(group)}"
                 )
             if len(group) >= MAX_GROUP_SIZE:
                 break  # Hit size limit
@@ -2111,14 +1896,14 @@ def _constrained_grouping(
         if finalizer_id and (processed % 1000 == 0 or len(remaining) == 0):
             pct = (processed / total) * 100
             logger.info(
-                f"[{finalizer_id}] Constrained grouping: {processed:,} / {total:,} nodes "
+                f"[Constrained grouping: {processed:,} / {total:,} nodes "
                 f"({pct:.1f}%), {len(groups)} groups, {len(remaining):,} remaining"
             )
 
     if finalizer_id:
         avg_size = sum(len(g) for g in groups) / len(groups) if groups else 0
         logger.info(
-            f"[{finalizer_id}] Built {len(groups)} constrained groups, avg size: {avg_size:.1f}"
+            f"[Built {len(groups)} constrained groups, avg size: {avg_size:.1f}"
         )
 
     return groups
