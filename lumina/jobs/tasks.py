@@ -43,7 +43,23 @@ try:
     CELERY_AVAILABLE = True
 except ImportError:
     CELERY_AVAILABLE = False
-    app = None  # type: ignore
+
+    # Create a dummy app with a no-op task decorator when Celery isn't available
+    class DummyApp:
+        @staticmethod
+        def task(*args, **kwargs):
+            """No-op decorator when Celery isn't available."""
+
+            def decorator(func):
+                return func
+
+            # Handle both @app.task and @app.task() syntax
+            if len(args) == 1 and callable(args[0]):
+                return args[0]
+            return decorator
+
+    app = DummyApp()  # type: ignore
+
 from .scan_stats import ScanStatistics
 
 logger = logging.getLogger(__name__)
