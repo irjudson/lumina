@@ -17,7 +17,7 @@ def scan_analyze_job(
     job_id: str,
     workers: int = 4,
     detect_duplicates: bool = False,
-    **kwargs,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Run catalog scan and analysis."""
     try:
@@ -61,7 +61,7 @@ def scan_analyze_job(
 
 
 def detect_duplicates_job(
-    catalog_id: str, job_id: str, similarity_threshold: int = 5, **kwargs
+    catalog_id: str, job_id: str, similarity_threshold: int = 5, **kwargs: Any
 ) -> Dict[str, Any]:
     """Run duplicate detection."""
     try:
@@ -93,7 +93,9 @@ def detect_duplicates_job(
         raise
 
 
-def generate_thumbnails_job(catalog_id: str, job_id: str, **kwargs) -> Dict[str, Any]:
+def generate_thumbnails_job(
+    catalog_id: str, job_id: str, **kwargs: Any
+) -> Dict[str, Any]:
     """Generate thumbnails for catalog images."""
     try:
         with CatalogDatabase(catalog_id) as _catalog_db:  # noqa: F841

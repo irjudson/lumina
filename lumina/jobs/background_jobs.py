@@ -16,7 +16,7 @@ _active_jobs: Dict[str, threading.Thread] = {}
 
 
 def create_job(
-    db_session,
+    db_session: Any,
     job_type: str,
     catalog_id: str,
     parameters: Dict[str, Any],
@@ -43,7 +43,7 @@ def update_job_status(
     progress: Optional[Dict[str, Any]] = None,
     result: Optional[Dict[str, Any]] = None,
     error: Optional[str] = None,
-):
+) -> None:
     """Update job status in database."""
     with next(get_db()) as db:
         job = db.query(Job).filter(Job.id == job_id).first()
@@ -62,13 +62,13 @@ def update_job_status(
 
 def run_job_in_background(
     job_id: str,
-    func: Callable,
-    *args,
-    **kwargs,
-):
+    func: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> None:
     """Run a job function in a background thread."""
 
-    def _wrapper():
+    def _wrapper() -> None:
         try:
             update_job_status(job_id, "PROGRESS")
             result = func(*args, job_id=job_id, **kwargs)
