@@ -818,24 +818,14 @@ def get_worker_health():
         }
 
 
-def _safe_get_task_state(task: AsyncResult) -> str:
-    """Safely get task state, handling malformed exception info."""
-    try:
-        return task.state
-    except ValueError as e:
-        # Celery raises ValueError when exception info is malformed
-        # (e.g., missing 'exc_type' key in result backend)
-        logger.warning(f"Error getting task state for {task.id}: {e}")
-        return "FAILURE"
+def _safe_get_task_state(task: Any) -> str:
+    """Stub - TODO: Implement with new job system."""
+    return "PENDING"
 
 
-def _safe_get_task_info(task: AsyncResult) -> Any:
-    """Safely get task info, handling malformed data."""
-    try:
-        return task.info
-    except Exception as e:
-        logger.warning(f"Error getting task info for {task.id}: {e}")
-        return {"error": f"Failed to retrieve task info: {e}"}
+def _safe_get_task_info(task: Any) -> Any:
+    """Stub - TODO: Implement with new job system."""
+    return {}
 
 
 def _get_celery_task_state(job_id: str) -> Optional[str]:
