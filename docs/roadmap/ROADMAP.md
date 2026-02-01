@@ -55,7 +55,7 @@ This document tracks the development progress of Lumina features. GitHub renders
 
 ### Backend Services
 - [x] **Docker deployment** - CUDA-enabled containers
-- [x] **Celery job system** - Background processing with Redis
+- [x] **Threading job system** - Background processing with fault tolerance
 - [x] **PostgreSQL backend** - Scalable database with JSONB
 - [x] **WebSocket progress** - Real-time job updates
 - [x] **REST API** - Full CRUD for catalogs, images, jobs
@@ -75,7 +75,7 @@ This document tracks the development progress of Lumina features. GitHub renders
 ### AI & Analysis
 - [x] **Auto-tagging with AI** - OpenCLIP and Ollama-based image classification
 - [x] **Tag taxonomy** - Hierarchical tags with categories (subject, scene, lighting, mood)
-- [x] **Batch tagging** - Background Celery task with checkpointing for resumability
+- [x] **Batch tagging** - Background threading jobs with database tracking
 - [x] **Combined backend** - Weighted OpenCLIP + Ollama for high accuracy
 - [x] **CLIP embeddings** - Stored for semantic search capability
 - [x] **Tag API** - Full REST API for tag management and filtering
@@ -150,7 +150,7 @@ Visualize and understand your photo collection.
 
 Cron-like scheduling for periodic analysis.
 
-- [ ] Celery Beat integration
+- [ ] Cron or APScheduler integration
 - [ ] Scheduled scan configuration
 - [ ] Run history tracking
 
