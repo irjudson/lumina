@@ -3,7 +3,7 @@
 import logging
 import uuid
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from sqlalchemy import text
 
@@ -344,7 +344,7 @@ def auto_tag_job(
 
 
 # Job registry
-JOB_FUNCTIONS = {
+JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "scan": scan_analyze_job,
     "analyze": scan_analyze_job,
     "detect_duplicates": detect_duplicates_job,

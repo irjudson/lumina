@@ -2,7 +2,7 @@
 Parallel Job Coordinator Pattern for Lumina.
 
 This module provides a standardized pattern for parallelizing large jobs
-across multiple Celery workers with:
+across multiple threading workers with:
 - Restartable batches tracked in database
 - Aggregated progress reporting
 - Fault tolerance (failed batches can be retried independently)
@@ -14,7 +14,7 @@ Architecture:
 Usage:
     1. Coordinator discovers all work items
     2. Coordinator creates job_batches records (PENDING)
-    3. Coordinator spawns worker tasks via Celery chord
+    3. Coordinator spawns worker threads via ThreadPoolExecutor
     4. Workers claim and process batches, update status
     5. Finalizer aggregates results when all workers complete
 """
@@ -99,7 +99,7 @@ class BatchManager:
 
         Args:
             catalog_id: The catalog UUID
-            parent_job_id: The coordinator task's Celery ID
+            parent_job_id: The coordinator job ID
             job_type: Type of job (scan, tag, duplicates, etc.)
         """
         self.catalog_id = catalog_id
@@ -192,7 +192,7 @@ class BatchManager:
 
         Args:
             batch_id: The batch UUID to claim
-            worker_id: The Celery task ID of the worker
+            worker_id: The worker thread ID
             db: Optional database connection
 
         Returns:
@@ -579,15 +579,15 @@ def publish_job_progress(
     phase: str = "processing",
 ) -> None:
     """
-    Publish aggregated job progress to Redis for UI updates.
+    Publish aggregated job progress for UI updates.
 
-    This function ensures monotonically increasing progress by checking the current
-    progress in Redis before publishing. If the new progress shows fewer completed
-    batches than what's already in Redis, the update is skipped to prevent the
-    frontend from seeing progress go backwards due to out-of-order worker updates.
+    This function ensures monotonically increasing progress by checking the last
+    published progress. If the new progress shows fewer completed batches than
+    what was already published, the update is skipped to prevent the frontend
+    from seeing progress go backwards due to out-of-order worker updates.
 
     Args:
-        parent_job_id: The coordinator's task ID
+        parent_job_id: The coordinator's job ID
         progress: Aggregated progress from BatchManager.get_progress()
         message: Human-readable status message (used as sub_message)
         phase: Current phase (discovery, processing, finalizing, complete)
@@ -700,10 +700,10 @@ def cancel_and_requeue_job(
     naturally continues from where it stopped.
 
     Args:
-        parent_job_id: The current job's Celery task ID
+        parent_job_id: The current job ID
         catalog_id: The catalog UUID
         job_type: Type of job for the Job record (e.g., "auto_tag", "scan")
-        task_name: Celery task name to queue (e.g., "tagging_coordinator")
+        task_name: Job function name (unused in threading system, kept for compatibility)
         task_kwargs: Keyword arguments for the continuation task
         reason: Human-readable reason for cancellation
         processed_so_far: Number of items successfully processed before cancel
@@ -716,7 +716,8 @@ def cancel_and_requeue_job(
 
     from ..db import get_db_context
     from ..db.models import Job
-    from .celery_app import app
+    from .background_jobs import run_job_in_background
+    from .job_implementations import JOB_FUNCTIONS
     from .progress_publisher import publish_completion
 
     # Mark current job as cancelled with continuation info
@@ -764,20 +765,20 @@ def cancel_and_requeue_job(
     except Exception as e:
         logger.error(f"Failed to create continuation job record: {e}")
 
-    # Queue the continuation task with delay
-    task = app.tasks.get(task_name)
-    if task:
-        task.apply_async(
-            kwargs=task_kwargs,
-            task_id=new_job_id,
-            countdown=REQUEUE_DELAY_SECONDS,
-        )
+    # Queue the continuation job with threading system
+    job_func = JOB_FUNCTIONS.get(job_type)
+    if job_func:
+        # Note: countdown/delay not supported in threading system yet
+        # Job starts immediately
+        run_job_in_background(new_job_id, job_func, **task_kwargs)
         logger.info(
             f"[{parent_job_id}] Queued continuation job {new_job_id} "
-            f"(starts in {REQUEUE_DELAY_SECONDS}s)"
+            f"(starting immediately)"
         )
     else:
-        logger.error(f"Task {task_name} not found, cannot queue continuation")
+        logger.error(
+            f"Job type {job_type} not found in JOB_FUNCTIONS, cannot queue continuation"
+        )
 
     return new_job_id
 
@@ -792,44 +793,22 @@ def start_chord_progress_monitor(
     countdown: int = 30,
 ) -> None:
     """
-    Start a progress monitor for a chord of workers.
+    Start a progress monitor for parallel workers.
 
-    This function launches a background task that periodically checks progress
-    and publishes updates. It supports two monitoring modes:
-
-    1. job_batches mode (default): Monitors BatchManager progress via job_batches table
-    2. celery_taskmeta mode: Monitors Celery result backend for worker completion
-       (used for chords that don't use job_batches, like duplicate comparison)
+    In the threading system, progress is monitored inline by the coordinator
+    rather than via a separate background task. This function is kept for
+    API compatibility but is a no-op.
 
     Args:
-        parent_job_id: The coordinator's task ID
+        parent_job_id: The coordinator's job ID
         catalog_id: The catalog UUID
         job_type: Job type for BatchManager
-        expected_workers: Expected number of workers (required if use_celery_backend=True)
-        use_celery_backend: If True, monitor celery_taskmeta; if False, monitor job_batches
-        comparison_start_time: ISO timestamp when workers started (for celery_taskmeta mode)
-        countdown: Seconds to wait before first check (default: 30)
+        expected_workers: Expected number of workers (unused in threading system)
+        use_celery_backend: Unused in threading system
+        comparison_start_time: Unused in threading system
+        countdown: Unused in threading system
     """
-    from .celery_app import app
-
-    # Validate parameters
-    if use_celery_backend and (
-        expected_workers is None or comparison_start_time is None
-    ):
-        raise ValueError(
-            "expected_workers and comparison_start_time required when use_celery_backend=True"
-        )
-
-    # Schedule the progress monitor task
-    app.send_task(
-        "chord_progress_monitor",
-        kwargs={
-            "parent_job_id": parent_job_id,
-            "catalog_id": catalog_id,
-            "job_type": job_type,
-            "expected_workers": expected_workers,
-            "use_celery_backend": use_celery_backend,
-            "comparison_start_time": comparison_start_time,
-        },
-        countdown=countdown,
+    logger.debug(
+        f"start_chord_progress_monitor called for {parent_job_id} "
+        f"(no-op in threading system, coordinator monitors progress inline)"
     )
