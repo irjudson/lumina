@@ -1,11 +1,11 @@
 """
 Parallel Tagging using the Coordinator Pattern.
 
-This module implements parallel-ready tagging across Celery workers:
+This module implements parallel-ready tagging across threading workers:
 
-1. tagging_coordinator_task: Queries images, creates batches, spawns workers
-2. tagging_worker_task: Processes a batch of images with the tagger
-3. tagging_finalizer_task: Aggregates results
+1. tagging_coordinator: Queries images, creates batches, spawns workers
+2. tagging_worker: Processes a batch of images with the tagger
+3. tagging_finalizer: Aggregates results
 
 Note: While the coordinator pattern enables parallel processing, tagging
 benefits most from batch processing on a single GPU worker due to model
@@ -22,15 +22,15 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import Future, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from celery import chord, group
 from sqlalchemy import text
 
 from ..db import CatalogDB as CatalogDatabase
 from ..db.models import Job
-from .celery_app import app
+from .background_jobs import get_executor, update_job_status
 from .coordinator import (
     CONSECUTIVE_FAILURE_THRESHOLD,
     BatchManager,
@@ -39,12 +39,12 @@ from .coordinator import (
     publish_job_progress,
 )
 from .progress_publisher import publish_completion, publish_progress
-from .tasks import CoordinatorTask, ProgressTask, _store_image_tags
+from .tag_storage import store_image_tags
 
 logger = logging.getLogger(__name__)
 
 
-def _update_job_status(
+def _update_job_status_db(
     job_id: str,
     status: str,
     result: Optional[Dict[str, Any]] = None,
@@ -68,9 +68,8 @@ def _update_job_status(
         logger.warning(f"Failed to update job status for {job_id}: {e}")
 
 
-@app.task(bind=True, base=CoordinatorTask, name="tagging_coordinator")
-def tagging_coordinator_task(
-    self: CoordinatorTask,
+def tagging_coordinator(
+    job_id: str,
     catalog_id: str,
     backend: str = "openclip",
     model: Optional[str] = None,
@@ -80,9 +79,10 @@ def tagging_coordinator_task(
     tag_mode: str = "untagged_only",
 ) -> Dict[str, Any]:
     """
-    Coordinator task for parallel image tagging.
+    Coordinator function for parallel image tagging.
 
     Args:
+        job_id: Job ID for this tagging
         catalog_id: UUID of the catalog
         backend: "openclip", "ollama", or "combined"
         model: Model name (backend-specific)
@@ -90,14 +90,21 @@ def tagging_coordinator_task(
         max_tags: Maximum tags per image
         batch_size: Number of images per batch (default 500 for GPU efficiency)
         tag_mode: "untagged_only" or "all"
+
+    Returns:
+        Final aggregated results
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(
         f"[{parent_job_id}] Starting tagging coordinator for catalog {catalog_id}"
     )
 
     try:
-        self.update_progress(0, 1, "Querying images...", {"phase": "init"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "init"},
+        )
 
         # Get images based on tag_mode
         with CatalogDatabase(catalog_id) as db:
@@ -142,11 +149,14 @@ def tagging_coordinator_task(
             return {"status": "completed", "message": "No images to tag"}
 
         # Create batches
-        self.update_progress(
-            0,
-            total_images,
-            f"Creating batches for {total_images} images...",
-            {"phase": "batching"},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_images,
+                "phase": "batching",
+            },
         )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "tagging")
@@ -161,57 +171,20 @@ def tagging_coordinator_task(
         num_batches = len(batch_ids)
         logger.info(f"[{parent_job_id}] Created {num_batches} batches")
 
-        # Spawn workers via chord
-        self.update_progress(
-            0,
-            total_images,
-            f"Spawning {num_batches} sub-tasks...",
-            {"phase": "spawning"},
+        # Spawn worker threads
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_images,
+                "phase": "spawning",
+                "num_batches": num_batches,
+            },
         )
 
-        worker_tasks = group(
-            tagging_worker_task.s(
-                catalog_id=catalog_id,
-                batch_id=batch_id,
-                parent_job_id=parent_job_id,
-                backend=backend,
-                model=model,
-                threshold=threshold,
-                max_tags=max_tags,
-            )
-            for batch_id in batch_ids
-        )
-
-        finalizer = tagging_finalizer_task.s(
-            catalog_id=catalog_id,
-            parent_job_id=parent_job_id,
-            backend=backend,
-            model=model,
-            threshold=threshold,
-            max_tags=max_tags,
-            batch_size=batch_size,
-        )
-
-        chord(worker_tasks)(finalizer)
-
-        # Start progress monitoring using generic monitor (job_batches mode)
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="tagging",
-            use_celery_backend=False,  # Use job_batches table for tracking
-            countdown=30,
-        )
-
-        logger.info(
-            f"[{parent_job_id}] Chord dispatched: {num_batches} sub-tasks → finalizer"
-        )
-
-        # Set job to STARTED state - workers are now processing
-        # The finalizer will update to SUCCESS when all batches complete
-        _update_job_status(
+        # Set job to STARTED state
+        _update_job_status_db(
             parent_job_id,
             "STARTED",
             result={
@@ -235,14 +208,57 @@ def tagging_coordinator_task(
             },
         )
 
-        return {
-            "status": "dispatched",
-            "catalog_id": catalog_id,
-            "total_images": total_images,
-            "num_batches": num_batches,
-            "backend": backend,
-            "message": f"Processing {total_images} images in {num_batches} batches",
-        }
+        # Execute workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: Dict[Future, str] = {}
+
+        for batch_id in batch_ids:
+            future = executor.submit(
+                tagging_worker,
+                catalog_id=catalog_id,
+                batch_id=batch_id,
+                parent_job_id=parent_job_id,
+                backend=backend,
+                model=model,
+                threshold=threshold,
+                max_tags=max_tags,
+            )
+            futures[future] = batch_id
+
+        # Wait for all workers to complete and collect results
+        worker_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                worker_result = future.result()
+                worker_results.append(worker_result)
+            except Exception as e:
+                batch_id = futures[future]
+                logger.error(f"Worker for batch {batch_id} raised exception: {e}")
+                worker_results.append(
+                    {
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        logger.info(
+            f"[{parent_job_id}] All {num_batches} workers complete, running finalizer"
+        )
+
+        # Run finalizer
+        final_result = tagging_finalizer(
+            worker_results=worker_results,
+            catalog_id=catalog_id,
+            parent_job_id=parent_job_id,
+            backend=backend,
+            model=model,
+            threshold=threshold,
+            max_tags=max_tags,
+            batch_size=batch_size,
+        )
+
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
@@ -250,9 +266,7 @@ def tagging_coordinator_task(
         raise
 
 
-@app.task(bind=True, name="tagging_worker")
-def tagging_worker_task(
-    self: Any,
+def tagging_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
@@ -261,10 +275,25 @@ def tagging_worker_task(
     threshold: float,
     max_tags: int,
 ) -> Dict[str, Any]:
-    """Worker task that processes a batch of images for tagging."""
+    """Worker function that processes a batch of images for tagging.
+
+    Args:
+        catalog_id: UUID of the catalog
+        batch_id: UUID of the batch to process
+        parent_job_id: Coordinator's job ID (for progress publishing)
+        backend: "openclip", "ollama", or "combined"
+        model: Model name (backend-specific)
+        threshold: Minimum confidence threshold
+        max_tags: Maximum tags per image
+
+    Returns:
+        BatchResult dictionary
+    """
+    import threading
+
     from .job_metrics import check_gpu_available
 
-    worker_id = self.request.id or "unknown"
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting tagging worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "tagging")
@@ -334,7 +363,7 @@ def tagging_worker_task(
                     for img_id, img_path in zip(batch_ids, batch_paths):
                         tags = tag_results.get(img_path, [])
                         if tags:
-                            stored = _store_image_tags(
+                            stored = store_image_tags(
                                 db, catalog_id, str(img_id), tags, backend
                             )
                             if stored > 0:
@@ -359,7 +388,7 @@ def tagging_worker_task(
                             max_tags=max_tags,
                         )
                         if tags:
-                            stored = _store_image_tags(
+                            stored = store_image_tags(
                                 db, catalog_id, str(img_id), tags, "ollama"
                             )
                             if stored > 0:
@@ -418,9 +447,7 @@ def tagging_worker_task(
         return {"batch_id": batch_id, "status": "failed", "error": str(e)}
 
 
-@app.task(bind=True, base=ProgressTask, name="tagging_finalizer")
-def tagging_finalizer_task(
-    self: ProgressTask,
+def tagging_finalizer(
     worker_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
@@ -434,12 +461,29 @@ def tagging_finalizer_task(
 
     If there are failed batches, automatically queues a continuation job
     to process remaining untagged images.
+
+    Args:
+        worker_results: List of results from all worker tasks
+        catalog_id: UUID of the catalog
+        parent_job_id: Coordinator's job ID
+        backend: Backend used for tagging
+        model: Model name (backend-specific)
+        threshold: Minimum confidence threshold
+        max_tags: Maximum tags per image
+        batch_size: Number of images per batch
+
+    Returns:
+        Final aggregated results
     """
-    finalizer_id = self.request.id or "unknown"
+    finalizer_id = parent_job_id
     logger.info(f"[{finalizer_id}] Starting finalizer for job {parent_job_id}")
 
     try:
-        self.update_progress(0, 1, "Aggregating results...", {"phase": "finalizing"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "finalizing"},
+        )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "tagging")
 
@@ -469,7 +513,7 @@ def tagging_finalizer_task(
                 parent_job_id=parent_job_id,
                 catalog_id=catalog_id,
                 job_type="auto_tag",
-                task_name="tagging_coordinator",
+                task_name="tagging_coordinator",  # Legacy parameter
                 task_kwargs={
                     "catalog_id": catalog_id,
                     "backend": backend,
@@ -501,13 +545,16 @@ def tagging_finalizer_task(
         }
 
         publish_completion(parent_job_id, "SUCCESS", result=final_result)
-        _update_job_status(parent_job_id, "SUCCESS", result=final_result)
+        _update_job_status_db(parent_job_id, "SUCCESS", result=final_result)
 
-        self.update_progress(
-            progress.total_items,
-            progress.total_items,
-            f"Complete: {total_tagged} images tagged",
-            {"phase": "complete"},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": progress.total_items,
+                "total": progress.total_items,
+                "phase": "complete",
+            },
         )
 
         logger.info(
@@ -519,5 +566,5 @@ def tagging_finalizer_task(
     except Exception as e:
         logger.error(f"[{finalizer_id}] Finalizer failed: {e}", exc_info=True)
         publish_completion(parent_job_id, "FAILURE", error=str(e))
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        _update_job_status_db(parent_job_id, "FAILURE", error=str(e))
         raise

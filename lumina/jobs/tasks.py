@@ -37,7 +37,13 @@ from ..shared.media_utils import get_file_type
 from ..shared.thumbnail_utils import generate_thumbnail, get_thumbnail_path
 
 # Import app here so that @app.task decorators can find it
-from .celery_app import app
+try:
+    from .celery_app import app
+
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    app = None  # type: ignore
 from .scan_stats import ScanStatistics
 
 logger = logging.getLogger(__name__)
