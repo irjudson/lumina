@@ -17,7 +17,14 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
-from celery import Task
+try:
+    from celery import Task
+
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    Task = object  # Fallback base class
+
 from sqlalchemy import text
 
 from lumina.core.types import FileType, ImageRecord, ImageStatus

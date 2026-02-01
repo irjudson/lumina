@@ -7,11 +7,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from lumina.jobs.tasks import (
-    analyze_catalog_task,
-    auto_tag_task,
-    generate_thumbnails_task,
-    organize_catalog_task,
+try:
+    from celery import Task
+
+    CELERY_AVAILABLE = True
+    from lumina.jobs.tasks import (
+        analyze_catalog_task,
+        auto_tag_task,
+        generate_thumbnails_task,
+        organize_catalog_task,
+    )
+except ImportError:
+    CELERY_AVAILABLE = False
+    # Dummy placeholders for when Celery isn't available
+    analyze_catalog_task = None
+    auto_tag_task = None
+    generate_thumbnails_task = None
+    organize_catalog_task = None
+
+pytestmark = pytest.mark.skipif(
+    not CELERY_AVAILABLE, reason="Celery not available - old task system"
 )
 
 

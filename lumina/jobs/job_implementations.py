@@ -1,9 +1,13 @@
 """Job implementations using the new background job system."""
 
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Dict
 
+from sqlalchemy import text
+
+from ..analysis.burst_detector import BurstDetector, ImageInfo
 from ..analysis.scanner import ImageScanner
 from ..db import CatalogDB as CatalogDatabase
 from .background_jobs import update_job_status
@@ -130,27 +134,156 @@ def detect_bursts_job(
 ) -> Dict[str, Any]:
     """Detect burst photo sequences."""
     try:
-        with CatalogDatabase(catalog_id) as _catalog_db:  # noqa: F841
+        logger.info(f"[{job_id}] Starting burst detection for catalog {catalog_id}")
+
+        update_job_status(
+            job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "percent": 0, "phase": "init"},
+        )
+
+        with CatalogDatabase(catalog_id) as db:
+            assert db.session is not None  # Always true inside context manager
+            # Clear existing bursts for this catalog
+            db.session.execute(
+                text("DELETE FROM bursts WHERE catalog_id = :catalog_id"),
+                {"catalog_id": catalog_id},
+            )
+            db.session.commit()
+
+            # Load images with timestamps - only those with proper date extraction
+            result = db.session.execute(
+                text(
+                    """
+                    SELECT id,
+                           (dates->>'selected_date')::timestamp as date_taken,
+                           metadata->>'camera_make' as camera_make,
+                           metadata->>'camera_model' as camera_model,
+                           quality_score
+                    FROM images
+                    WHERE catalog_id = :catalog_id
+                    AND dates->>'selected_date' IS NOT NULL
+                    AND (dates->>'confidence')::int >= 70
+                    ORDER BY (dates->>'selected_date')::timestamp
+                """
+                ),
+                {"catalog_id": catalog_id},
+            )
+
+            images = [
+                ImageInfo(
+                    image_id=str(row[0]),
+                    timestamp=row[1],
+                    camera_make=row[2],
+                    camera_model=row[3],
+                    quality_score=row[4] or 0.0,
+                )
+                for row in result.fetchall()
+            ]
+
+            logger.info(f"[{job_id}] Loaded {len(images)} images with timestamps")
+
             update_job_status(
                 job_id,
                 "PROGRESS",
                 progress={
-                    "current": 0,
-                    "total": 100,
-                    "percent": 0,
-                    "phase": "detecting_bursts",
+                    "current": 1,
+                    "total": 2,
+                    "percent": 50,
+                    "phase": "detecting",
+                    "images_loaded": len(images),
                 },
             )
 
-            # TODO: Implement burst detection
-            # For now, just a stub
+            # Detect bursts
+            detector = BurstDetector(
+                gap_threshold_seconds=gap_threshold,
+                min_burst_size=min_burst_size,
+            )
+            bursts = detector.detect_bursts(images)
 
-            result = {
-                "bursts_found": 0,
+            logger.info(f"[{job_id}] Detected {len(bursts)} bursts")
+
+            update_job_status(
+                job_id,
+                "PROGRESS",
+                progress={
+                    "current": 1,
+                    "total": 2,
+                    "percent": 75,
+                    "phase": "saving",
+                    "bursts_detected": len(bursts),
+                },
+            )
+
+            # Save bursts to database
+            total_burst_images = 0
+            for burst in bursts:
+                burst_id = str(uuid.uuid4())
+
+                # Insert burst record
+                db.session.execute(
+                    text(
+                        """
+                        INSERT INTO bursts (
+                            id, catalog_id, image_count, start_time, end_time,
+                            duration_seconds, camera_make, camera_model,
+                            best_image_id, selection_method, created_at
+                        ) VALUES (
+                            :id, :catalog_id, :image_count, :start_time, :end_time,
+                            :duration, :camera_make, :camera_model,
+                            :best_image_id, :selection_method, NOW()
+                        )
+                    """
+                    ),
+                    {
+                        "id": burst_id,
+                        "catalog_id": catalog_id,
+                        "image_count": len(burst.images),
+                        "start_time": burst.start_time,
+                        "end_time": burst.end_time,
+                        "duration": burst.duration_seconds,
+                        "camera_make": burst.camera_make,
+                        "camera_model": burst.camera_model,
+                        "best_image_id": burst.best_image_id,
+                        "selection_method": "quality",
+                    },
+                )
+
+                # Update images with burst_id and sequence
+                for seq, image in enumerate(burst.images):
+                    db.session.execute(
+                        text(
+                            """
+                            UPDATE images
+                            SET burst_id = :burst_id, burst_sequence = :sequence
+                            WHERE id = :image_id
+                        """
+                        ),
+                        {
+                            "burst_id": burst_id,
+                            "sequence": seq,
+                            "image_id": image.image_id,
+                        },
+                    )
+                    total_burst_images += 1
+
+            db.session.commit()
+
+            job_result = {
+                "status": "completed",
+                "bursts_detected": len(bursts),
+                "images_processed": len(images),
+                "total_burst_images": total_burst_images,
                 "catalog_id": catalog_id,
             }
 
-            return result
+            logger.info(
+                f"[{job_id}] Burst detection complete: {len(bursts)} bursts, "
+                f"{total_burst_images} images"
+            )
+
+            return job_result
 
     except Exception:
         logger.exception(f"Burst detection job {job_id} failed")

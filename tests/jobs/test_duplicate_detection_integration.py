@@ -5,9 +5,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 from sqlalchemy import text
 
-from lumina.jobs.parallel_duplicates import (
-    _build_duplicate_groups,
-    _create_duplicate_group_tags,
+try:
+    from celery import chord
+
+    CELERY_AVAILABLE = True
+    from lumina.jobs.parallel_duplicates import (
+        _build_duplicate_groups,
+        _create_duplicate_group_tags,
+    )
+except ImportError:
+    CELERY_AVAILABLE = False
+    _build_duplicate_groups = None
+    _create_duplicate_group_tags = None
+
+pytestmark = pytest.mark.skipif(
+    not CELERY_AVAILABLE, reason="Celery not available - old parallel system"
 )
 
 

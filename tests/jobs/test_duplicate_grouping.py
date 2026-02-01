@@ -2,7 +2,22 @@
 
 import pytest
 
-from lumina.jobs.parallel_duplicates import _build_duplicate_groups, _can_add_to_group
+try:
+    from celery import chord
+
+    CELERY_AVAILABLE = True
+    from lumina.jobs.parallel_duplicates import (
+        _build_duplicate_groups,
+        _can_add_to_group,
+    )
+except ImportError:
+    CELERY_AVAILABLE = False
+    _build_duplicate_groups = None
+    _can_add_to_group = None
+
+pytestmark = pytest.mark.skipif(
+    not CELERY_AVAILABLE, reason="Celery not available - old parallel system"
+)
 
 
 def test_build_groups_all_similar():

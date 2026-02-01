@@ -30,7 +30,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
-from celery import chord, group
+
+try:
+    from celery import chord, group
+
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    chord = None
+    group = None
+
 from PIL import Image
 from sqlalchemy import text
 from sqlalchemy.engine import Result

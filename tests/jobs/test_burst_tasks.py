@@ -1,4 +1,4 @@
-"""Tests for burst detection Celery tasks."""
+"""Tests for burst detection job."""
 
 import uuid
 from datetime import datetime, timedelta
@@ -7,22 +7,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-class TestDetectBurstsTask:
-    """Tests for detect_bursts_task."""
+class TestDetectBurstsJob:
+    """Tests for detect_bursts_job."""
 
-    def test_task_registration(self):
-        """Test task is registered with Celery."""
-        from lumina.jobs.tasks import detect_bursts_task
-
-        assert detect_bursts_task.name == "detect_bursts"
-
-    @patch("lumina.jobs.tasks.CatalogDatabase")
-    @patch("lumina.jobs.tasks.BurstDetector")
-    def test_detect_bursts_task_creates_burst_records(
+    @patch("lumina.jobs.job_implementations.CatalogDatabase")
+    @patch("lumina.jobs.job_implementations.BurstDetector")
+    def test_detect_bursts_job_creates_burst_records(
         self, mock_burst_detector, mock_catalog_db
     ):
-        """Test that task creates burst records in database."""
-        from lumina.jobs.tasks import detect_bursts_task
+        """Test that job creates burst records in database."""
+        from lumina.jobs.job_implementations import detect_bursts_job
 
         # Setup mocks
         mock_db = MagicMock()
@@ -67,13 +61,10 @@ class TestDetectBurstsTask:
         burst_group.best_image_id = "img-002"  # Middle image
         mock_detector.detect_bursts.return_value = [burst_group]
 
-        # Setup task
-        task = detect_bursts_task
-        task.update_state = MagicMock()
-
         # Execute
         catalog_id = str(uuid.uuid4())
-        result = task(catalog_id)
+        job_id = str(uuid.uuid4())
+        result = detect_bursts_job(catalog_id, job_id)
 
         # Verify
         assert result["status"] == "completed"
@@ -93,13 +84,13 @@ class TestDetectBurstsTask:
         assert mock_db.session.execute.called
         assert mock_db.session.commit.called
 
-    @patch("lumina.jobs.tasks.CatalogDatabase")
-    @patch("lumina.jobs.tasks.BurstDetector")
-    def test_detect_bursts_task_updates_image_burst_ids(
+    @patch("lumina.jobs.job_implementations.CatalogDatabase")
+    @patch("lumina.jobs.job_implementations.BurstDetector")
+    def test_detect_bursts_job_updates_image_burst_ids(
         self, mock_burst_detector, mock_catalog_db
     ):
-        """Test that task updates images with burst_id and burst_sequence."""
-        from lumina.jobs.tasks import detect_bursts_task
+        """Test that job updates images with burst_id and burst_sequence."""
+        from lumina.jobs.job_implementations import detect_bursts_job
 
         # Setup mocks
         mock_db = MagicMock()
@@ -137,13 +128,10 @@ class TestDetectBurstsTask:
         burst_group.best_image_id = "img-002"
         mock_detector.detect_bursts.return_value = [burst_group]
 
-        # Setup task
-        task = detect_bursts_task
-        task.update_state = MagicMock()
-
         # Execute
         catalog_id = str(uuid.uuid4())
-        result = task(catalog_id)
+        job_id = str(uuid.uuid4())
+        result = detect_bursts_job(catalog_id, job_id)
 
         # Verify result
         assert result["status"] == "completed"
@@ -156,13 +144,13 @@ class TestDetectBurstsTask:
         ]
         assert len(update_calls) >= 3  # At least 3 update calls for the images
 
-    @patch("lumina.jobs.tasks.CatalogDatabase")
-    @patch("lumina.jobs.tasks.BurstDetector")
-    def test_detect_bursts_task_clears_existing_bursts(
+    @patch("lumina.jobs.job_implementations.CatalogDatabase")
+    @patch("lumina.jobs.job_implementations.BurstDetector")
+    def test_detect_bursts_job_clears_existing_bursts(
         self, mock_burst_detector, mock_catalog_db
     ):
-        """Test that task clears existing bursts before detection."""
-        from lumina.jobs.tasks import detect_bursts_task
+        """Test that job clears existing bursts before detection."""
+        from lumina.jobs.job_implementations import detect_bursts_job
 
         # Setup mocks
         mock_db = MagicMock()
@@ -178,13 +166,10 @@ class TestDetectBurstsTask:
         mock_burst_detector.return_value = mock_detector
         mock_detector.detect_bursts.return_value = []
 
-        # Setup task
-        task = detect_bursts_task
-        task.update_state = MagicMock()
-
         # Execute
         catalog_id = str(uuid.uuid4())
-        result = task(catalog_id)
+        job_id = str(uuid.uuid4())
+        result = detect_bursts_job(catalog_id, job_id)
 
         # Verify DELETE was called for existing bursts
         execute_calls = mock_db.session.execute.call_args_list
@@ -193,13 +178,13 @@ class TestDetectBurstsTask:
         ]
         assert len(delete_calls) >= 1
 
-    @patch("lumina.jobs.tasks.CatalogDatabase")
-    @patch("lumina.jobs.tasks.BurstDetector")
-    def test_detect_bursts_task_with_custom_parameters(
+    @patch("lumina.jobs.job_implementations.CatalogDatabase")
+    @patch("lumina.jobs.job_implementations.BurstDetector")
+    def test_detect_bursts_job_with_custom_parameters(
         self, mock_burst_detector, mock_catalog_db
     ):
-        """Test that task respects custom gap_threshold and min_burst_size."""
-        from lumina.jobs.tasks import detect_bursts_task
+        """Test that job respects custom gap_threshold and min_burst_size."""
+        from lumina.jobs.job_implementations import detect_bursts_job
 
         # Setup mocks
         mock_db = MagicMock()
@@ -213,26 +198,25 @@ class TestDetectBurstsTask:
         mock_burst_detector.return_value = mock_detector
         mock_detector.detect_bursts.return_value = []
 
-        # Setup task
-        task = detect_bursts_task
-        task.update_state = MagicMock()
-
         # Execute with custom parameters
         catalog_id = str(uuid.uuid4())
-        result = task(catalog_id, gap_threshold=3.0, min_burst_size=5)
+        job_id = str(uuid.uuid4())
+        result = detect_bursts_job(
+            catalog_id, job_id, gap_threshold=3.0, min_burst_size=5
+        )
 
         # Verify BurstDetector was initialized with custom parameters
         mock_burst_detector.assert_called_once_with(
             gap_threshold_seconds=3.0, min_burst_size=5
         )
 
-    @patch("lumina.jobs.tasks.CatalogDatabase")
-    @patch("lumina.jobs.tasks.BurstDetector")
-    def test_detect_bursts_task_handles_no_bursts(
+    @patch("lumina.jobs.job_implementations.CatalogDatabase")
+    @patch("lumina.jobs.job_implementations.BurstDetector")
+    def test_detect_bursts_job_handles_no_bursts(
         self, mock_burst_detector, mock_catalog_db
     ):
-        """Test that task handles case with no bursts detected."""
-        from lumina.jobs.tasks import detect_bursts_task
+        """Test that job handles case with no bursts detected."""
+        from lumina.jobs.job_implementations import detect_bursts_job
 
         # Setup mocks
         mock_db = MagicMock()
@@ -254,13 +238,10 @@ class TestDetectBurstsTask:
         mock_burst_detector.return_value = mock_detector
         mock_detector.detect_bursts.return_value = []
 
-        # Setup task
-        task = detect_bursts_task
-        task.update_state = MagicMock()
-
         # Execute
         catalog_id = str(uuid.uuid4())
-        result = task(catalog_id)
+        job_id = str(uuid.uuid4())
+        result = detect_bursts_job(catalog_id, job_id)
 
         # Verify
         assert result["status"] == "completed"
