@@ -1,15 +1,16 @@
 """
 Parallel Scan Tasks using the Coordinator Pattern.
 
-This module implements parallel directory scanning across multiple Celery workers:
+This module implements parallel directory scanning across multiple threading workers:
 
-1. scan_coordinator_task: Discovers files, creates batches, spawns workers
-2. scan_worker_task: Processes a batch of files
-3. scan_finalizer_task: Aggregates results and updates catalog
+1. scan_coordinator: Discovers files, creates batches, spawns workers
+2. scan_worker: Processes a batch of files
+3. scan_finalizer: Aggregates results and updates catalog
 
 Usage:
-    # Start a parallel scan
-    result = scan_coordinator_task.delay(
+    # Start a parallel scan via background_jobs.run_job_in_background
+    from .job_implementations import scan_parallel_job
+    run_job_in_background(job_id, scan_parallel_job,
         catalog_id="...",
         source_directories=["/path/to/photos"],
         batch_size=1000,  # Files per worker
@@ -21,11 +22,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import Future, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from celery import chord, group
 from sqlalchemy import text
 
 from ..analysis.scanner import _process_file_worker
@@ -33,7 +34,7 @@ from ..db import CatalogDB as CatalogDatabase
 from ..db.models import Job
 from ..shared.media_utils import get_file_type
 from ..shared.thumbnail_utils import generate_thumbnail, get_thumbnail_path
-from .celery_app import app
+from .background_jobs import get_executor, update_job_status
 from .coordinator import (
     CONSECUTIVE_FAILURE_THRESHOLD,
     BatchManager,
@@ -43,12 +44,11 @@ from .coordinator import (
 )
 from .progress_publisher import publish_completion, publish_progress
 from .scan_stats import ScanStatistics
-from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
 
 
-def _update_job_status(
+def _update_job_status_db(
     job_id: str,
     status: str,
     result: Optional[Dict[str, Any]] = None,
@@ -57,8 +57,7 @@ def _update_job_status(
     """
     Update job status directly in the database.
 
-    This bypasses Celery's automatic status updates, allowing us to keep
-    the coordinator job in PROGRESS state while workers are running.
+    This allows us to keep the coordinator job in PROGRESS state while workers are running.
 
     Args:
         job_id: The job UUID
@@ -150,9 +149,8 @@ def _discover_media_files(
     return all_files, stats
 
 
-@app.task(bind=True, base=CoordinatorTask, name="scan_coordinator")
-def scan_coordinator_task(
-    self: CoordinatorTask,
+def scan_coordinator(
+    job_id: str,
     catalog_id: str,
     source_directories: List[str],
     force_rescan: bool = False,
@@ -160,15 +158,16 @@ def scan_coordinator_task(
     batch_size: int = 1000,
 ) -> Dict[str, Any]:
     """
-    Coordinator task for parallel catalog scanning.
+    Coordinator function for parallel catalog scanning.
 
-    This task:
+    This function:
     1. Discovers all media files in source directories
     2. Creates batches in the database
-    3. Spawns worker tasks via Celery chord
-    4. The chord callback triggers the finalizer
+    3. Spawns worker threads via ThreadPoolExecutor
+    4. Runs finalizer after all workers complete
 
     Args:
+        job_id: Job ID for this scan
         catalog_id: UUID of the catalog
         source_directories: List of directories to scan
         force_rescan: Clear existing images first
@@ -176,14 +175,18 @@ def scan_coordinator_task(
         batch_size: Number of files per batch/worker
 
     Returns:
-        Dictionary with job setup info (actual results come from finalizer)
+        Dictionary with final results
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(f"[{parent_job_id}] Starting scan coordinator for catalog {catalog_id}")
 
     try:
         # Phase 1: Initialize
-        self.update_progress(0, 1, "Initializing parallel scan...", {"phase": "init"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "init"},
+        )
 
         stats = ScanStatistics()
 
@@ -202,8 +205,10 @@ def scan_coordinator_task(
 
             if force_rescan:
                 logger.info(f"[{parent_job_id}] Force rescan: clearing existing images")
-                self.update_progress(
-                    0, 1, "Clearing existing images...", {"phase": "clearing"}
+                update_job_status(
+                    parent_job_id,
+                    "PROGRESS",
+                    progress={"current": 0, "total": 1, "phase": "clearing"},
                 )
                 assert db.session is not None
                 db.session.execute(
@@ -214,7 +219,11 @@ def scan_coordinator_task(
                 db.session.commit()
 
         # Phase 2: Discover files
-        self.update_progress(0, 1, "Discovering files...", {"phase": "discovery"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "discovery"},
+        )
 
         all_files, stats = _discover_media_files(source_directories, stats)
         total_files = len(all_files)
@@ -245,11 +254,15 @@ def scan_coordinator_task(
             }
 
         # Phase 3: Create batches
-        self.update_progress(
-            0,
-            total_files,
-            f"Creating batches for {total_files} files...",
-            {"phase": "batching", "total_files": total_files},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_files,
+                "phase": "batching",
+                "total_files": total_files,
+            },
         )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "scan")
@@ -284,54 +297,20 @@ def scan_coordinator_task(
             f"({batch_size} files each)"
         )
 
-        # Phase 4: Spawn sub-tasks via chord
-        # chord(group(sub-tasks), finalizer) - finalizer runs after all sub-tasks complete
-        self.update_progress(
-            0,
-            total_files,
-            f"Spawning {num_batches} sub-tasks...",
-            {"phase": "spawning", "num_batches": num_batches},
-        )
-
-        worker_tasks = group(
-            scan_worker_task.s(
-                catalog_id=catalog_id,
-                batch_id=batch_id,
-                parent_job_id=parent_job_id,
-                generate_previews=generate_previews,
-            )
-            for batch_id in batch_ids
-        )
-
-        finalizer = scan_finalizer_task.s(
-            catalog_id=catalog_id,
-            parent_job_id=parent_job_id,
-            source_directories=source_directories,
-            generate_previews=generate_previews,
-            batch_size=batch_size,
-        )
-
-        # Execute the chord (sub-tasks in parallel, then finalizer)
-        chord(worker_tasks)(finalizer)
-
-        # Start progress monitoring using generic monitor (job_batches mode)
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="scan",
-            use_celery_backend=False,  # Use job_batches table for tracking
-            countdown=30,
-        )
-
-        logger.info(
-            f"[{parent_job_id}] Chord dispatched: {num_batches} sub-tasks → finalizer"
+        # Phase 4: Spawn worker threads
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_files,
+                "phase": "spawning",
+                "num_batches": num_batches,
+            },
         )
 
         # Set job to STARTED state - workers are now processing
-        # The finalizer will update to SUCCESS when all batches complete
-        _update_job_status(
+        _update_job_status_db(
             parent_job_id,
             "STARTED",
             result={
@@ -342,7 +321,7 @@ def scan_coordinator_task(
             },
         )
 
-        # Publish initial progress to Redis
+        # Publish initial progress
         publish_progress(
             parent_job_id,
             "PROGRESS",
@@ -358,16 +337,53 @@ def scan_coordinator_task(
             },
         )
 
-        # Return immediately - sub-tasks will process in background
-        return {
-            "status": "dispatched",
-            "catalog_id": catalog_id,
-            "parent_job_id": parent_job_id,
-            "total_files": total_files,
-            "num_batches": num_batches,
-            "batch_size": batch_size,
-            "message": f"Processing {total_files} files in {num_batches} batches",
-        }
+        # Execute workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: Dict[Future, str] = {}
+
+        for batch_id in batch_ids:
+            future = executor.submit(
+                scan_worker,
+                catalog_id=catalog_id,
+                batch_id=batch_id,
+                parent_job_id=parent_job_id,
+                generate_previews=generate_previews,
+            )
+            futures[future] = batch_id
+
+        # Wait for all workers to complete and collect results
+        worker_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                worker_results.append(result)
+            except Exception as e:
+                batch_id = futures[future]
+                logger.error(f"Worker for batch {batch_id} raised exception: {e}")
+                worker_results.append(
+                    {
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        logger.info(
+            f"[{parent_job_id}] All {num_batches} workers complete, "
+            f"running finalizer"
+        )
+
+        # Run finalizer
+        final_result = scan_finalizer(
+            worker_results=worker_results,
+            catalog_id=catalog_id,
+            parent_job_id=parent_job_id,
+            source_directories=source_directories,
+            generate_previews=generate_previews,
+            batch_size=batch_size,
+        )
+
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
@@ -375,16 +391,14 @@ def scan_coordinator_task(
         raise
 
 
-@app.task(bind=True, name="scan_worker")
-def scan_worker_task(
-    self: Any,
+def scan_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
     generate_previews: bool = True,
 ) -> Dict[str, Any]:
     """
-    Worker task that processes a batch of files.
+    Worker function that processes a batch of files.
 
     Each worker:
     1. Claims its batch (PENDING → RUNNING)
@@ -395,13 +409,15 @@ def scan_worker_task(
     Args:
         catalog_id: UUID of the catalog
         batch_id: UUID of the batch to process
-        parent_job_id: Coordinator's task ID (for progress publishing)
+        parent_job_id: Coordinator's job ID (for progress publishing)
         generate_previews: Whether to generate thumbnails
 
     Returns:
         BatchResult dictionary
     """
-    worker_id = self.request.id or "unknown"
+    import threading
+
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting scan worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "scan")
@@ -555,9 +571,7 @@ def scan_worker_task(
         }
 
 
-@app.task(bind=True, base=ProgressTask, name="scan_finalizer")
-def scan_finalizer_task(
-    self: ProgressTask,
+def scan_finalizer(
     worker_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
@@ -566,20 +580,20 @@ def scan_finalizer_task(
     batch_size: int = 1000,
 ) -> Dict[str, Any]:
     """
-    Finalizer task that aggregates results after all workers complete.
+    Finalizer function that aggregates results after all workers complete.
 
-    This task:
+    This function:
     1. Collects results from all worker tasks
     2. Aggregates statistics
     3. Updates catalog state
-    4. Publishes completion to Redis
+    4. Publishes completion
     5. Cleans up batch records
     6. Auto-requeues if too many batches failed
 
     Args:
         worker_results: List of results from all worker tasks
         catalog_id: UUID of the catalog
-        parent_job_id: Coordinator's task ID
+        parent_job_id: Coordinator's job ID
         source_directories: Original source directories for requeue
         generate_previews: Whether workers generate thumbnails
         batch_size: Number of files per batch
@@ -587,14 +601,18 @@ def scan_finalizer_task(
     Returns:
         Final aggregated results
     """
-    finalizer_id = self.request.id or "unknown"
+    finalizer_id = parent_job_id
     logger.info(
         f"[{finalizer_id}] Starting finalizer for job {parent_job_id} "
         f"({len(worker_results)} worker results)"
     )
 
     try:
-        self.update_progress(0, 1, "Aggregating results...", {"phase": "finalizing"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "finalizing"},
+        )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "scan")
 
@@ -695,7 +713,7 @@ def scan_finalizer_task(
                 parent_job_id=parent_job_id,
                 catalog_id=catalog_id,
                 job_type="scan",
-                task_name="scan_coordinator",
+                task_name="scan_coordinator",  # Legacy parameter, not used in threading system
                 task_kwargs={
                     "catalog_id": catalog_id,
                     "source_directories": source_directories,
@@ -736,7 +754,7 @@ def scan_finalizer_task(
             "errors": all_errors[:50],  # Limit error list
         }
 
-        # Publish completion to Redis
+        # Publish completion
         publish_completion(
             parent_job_id,
             "SUCCESS",
@@ -744,14 +762,16 @@ def scan_finalizer_task(
         )
 
         # Update job status in database to SUCCESS
-        # This completes the job lifecycle started by the coordinator
-        _update_job_status(parent_job_id, "SUCCESS", result=final_result)
+        _update_job_status_db(parent_job_id, "SUCCESS", result=final_result)
 
-        self.update_progress(
-            progress.total_items,
-            progress.total_items,
-            f"Scan complete: {total_success} files added",
-            {"phase": "complete"},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": progress.total_items,
+                "total": progress.total_items,
+                "phase": "complete",
+            },
         )
 
         logger.info(
@@ -769,18 +789,17 @@ def scan_finalizer_task(
         logger.error(f"[{finalizer_id}] Finalizer failed: {e}", exc_info=True)
         publish_completion(parent_job_id, "FAILURE", error=str(e))
         # Update job status in database to FAILURE
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        _update_job_status_db(parent_job_id, "FAILURE", error=str(e))
         raise
 
 
-@app.task(name="scan_recovery")
-def scan_recovery_task(
+def scan_recovery(
     catalog_id: str,
     parent_job_id: str,
     stale_minutes: int = 10,
 ) -> Dict[str, Any]:
     """
-    Legacy recovery task - delegates to generic job_recovery.
+    Legacy recovery function - delegates to generic job_recovery.
 
     Kept for backward compatibility with existing API endpoints.
     """
