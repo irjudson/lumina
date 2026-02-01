@@ -16,8 +16,8 @@ pytestmark = pytest.mark.integration
 class TestAutoTagEndpoint:
     """Tests for POST /api/catalogs/{catalog_id}/auto-tag endpoint."""
 
-    @patch("lumina.jobs.tasks.auto_tag_task")
-    def test_start_auto_tag_success(self, mock_task, client, db_session):
+    @patch("lumina.jobs.background_jobs.run_job_in_background")
+    def test_start_auto_tag_success(self, mock_run_job, client, db_session):
         """Test starting an auto-tag job successfully."""
         # Create a real catalog in the test database
         catalog_id = uuid.uuid4()
@@ -30,10 +30,8 @@ class TestAutoTagEndpoint:
         db_session.add(catalog)
         db_session.commit()
 
-        # Mock the task
-        mock_async_result = MagicMock()
-        mock_async_result.id = str(uuid.uuid4())
-        mock_task.apply_async.return_value = mock_async_result
+        # Mock run_job_in_background to do nothing
+        mock_run_job.return_value = None
 
         response = client.post(
             f"/api/catalogs/{catalog.id}/auto-tag",
@@ -46,8 +44,11 @@ class TestAutoTagEndpoint:
         assert data["status"] == "pending"
         assert "openclip" in data["message"]
 
-    @patch("lumina.jobs.tasks.auto_tag_task")
-    def test_start_auto_tag_with_ollama(self, mock_task, client, db_session):
+        # Verify run_job_in_background was called
+        assert mock_run_job.called
+
+    @patch("lumina.jobs.background_jobs.run_job_in_background")
+    def test_start_auto_tag_with_ollama(self, mock_run_job, client, db_session):
         """Test starting an auto-tag job with Ollama backend."""
         # Create a real catalog in the test database
         catalog_id = uuid.uuid4()
@@ -60,9 +61,8 @@ class TestAutoTagEndpoint:
         db_session.add(catalog)
         db_session.commit()
 
-        mock_async_result = MagicMock()
-        mock_async_result.id = str(uuid.uuid4())
-        mock_task.apply_async.return_value = mock_async_result
+        # Mock run_job_in_background
+        mock_run_job.return_value = None
 
         response = client.post(
             f"/api/catalogs/{catalog.id}/auto-tag",
@@ -73,14 +73,16 @@ class TestAutoTagEndpoint:
         data = response.json()
         assert "ollama" in data["message"]
 
-        # Verify task was called with correct parameters
-        mock_task.apply_async.assert_called_once()
-        call_kwargs = mock_task.apply_async.call_args.kwargs["kwargs"]
+        # Verify run_job_in_background was called with correct parameters
+        assert mock_run_job.called
+        call_kwargs = mock_run_job.call_args.kwargs
         assert call_kwargs["backend"] == "ollama"
         assert call_kwargs["model"] == "llava"
 
-    @patch("lumina.jobs.tasks.auto_tag_task")
-    def test_start_auto_tag_with_continue_pipeline(self, mock_task, client, db_session):
+    @patch("lumina.jobs.background_jobs.run_job_in_background")
+    def test_start_auto_tag_with_continue_pipeline(
+        self, mock_run_job, client, db_session
+    ):
         """Test starting auto-tag with continue_pipeline flag."""
         # Create a real catalog in the test database
         catalog_id = uuid.uuid4()
@@ -93,9 +95,8 @@ class TestAutoTagEndpoint:
         db_session.add(catalog)
         db_session.commit()
 
-        mock_async_result = MagicMock()
-        mock_async_result.id = str(uuid.uuid4())
-        mock_task.apply_async.return_value = mock_async_result
+        # Mock run_job_in_background
+        mock_run_job.return_value = None
 
         response = client.post(
             f"/api/catalogs/{catalog.id}/auto-tag",
@@ -104,8 +105,9 @@ class TestAutoTagEndpoint:
 
         assert response.status_code == 200
 
-        # Verify task was called with continue_pipeline=True
-        call_kwargs = mock_task.apply_async.call_args.kwargs["kwargs"]
+        # Verify run_job_in_background was called with continue_pipeline=True
+        assert mock_run_job.called
+        call_kwargs = mock_run_job.call_args.kwargs
         assert call_kwargs["continue_pipeline"] is True
 
     def test_start_auto_tag_catalog_not_found(self, client, db_session):
@@ -140,8 +142,10 @@ class TestAutoTagEndpoint:
         assert response.status_code == 400
         assert "Invalid backend" in response.json()["detail"]
 
-    @patch("lumina.jobs.tasks.auto_tag_task")
-    def test_start_auto_tag_with_custom_threshold(self, mock_task, client, db_session):
+    @patch("lumina.jobs.background_jobs.run_job_in_background")
+    def test_start_auto_tag_with_custom_threshold(
+        self, mock_run_job, client, db_session
+    ):
         """Test starting auto-tag with custom threshold."""
         # Create a real catalog in the test database
         catalog_id = uuid.uuid4()
@@ -154,9 +158,8 @@ class TestAutoTagEndpoint:
         db_session.add(catalog)
         db_session.commit()
 
-        mock_async_result = MagicMock()
-        mock_async_result.id = str(uuid.uuid4())
-        mock_task.apply_async.return_value = mock_async_result
+        # Mock run_job_in_background
+        mock_run_job.return_value = None
 
         response = client.post(
             f"/api/catalogs/{catalog.id}/auto-tag",
@@ -165,8 +168,9 @@ class TestAutoTagEndpoint:
 
         assert response.status_code == 200
 
-        # Verify task was called with custom parameters
-        call_kwargs = mock_task.apply_async.call_args.kwargs["kwargs"]
+        # Verify run_job_in_background was called with custom parameters
+        assert mock_run_job.called
+        call_kwargs = mock_run_job.call_args.kwargs
         assert call_kwargs["threshold"] == 0.5
         assert call_kwargs["max_tags"] == 5
 

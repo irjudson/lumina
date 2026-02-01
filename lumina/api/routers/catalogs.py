@@ -1635,27 +1635,16 @@ def start_auto_tagging(
             detail="Invalid tag_mode. Use 'untagged_only' or 'all'",
         )
 
-    # Import Celery task
-    from ...db.models import Job
-    from ...jobs.tasks import auto_tag_task
-
-    # Generate job ID upfront (used as both DB id and Celery task id)
-    job_id = str(uuid.uuid4())
+    # Import threading job system
+    from ...jobs.background_jobs import create_job, run_job_in_background
+    from ...jobs.job_implementations import JOB_FUNCTIONS
 
     # Create job record
-    job = Job(
-        id=job_id,
-        catalog_id=catalog_id,
+    job = create_job(
+        db,
         job_type="auto_tag",
-        status="pending",
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    # Start Celery task with same ID
-    task = auto_tag_task.apply_async(
-        kwargs={
+        catalog_id=catalog_id,
+        parameters={
             "catalog_id": str(catalog_id),
             "backend": backend,
             "model": model,
@@ -1665,8 +1654,23 @@ def start_auto_tagging(
             "tag_mode": tag_mode,
             "continue_pipeline": continue_pipeline,
         },
-        task_id=job_id,
     )
+
+    # Get job function and run in background
+    job_func = JOB_FUNCTIONS.get("auto_tag")
+    if job_func:
+        run_job_in_background(
+            job.id,
+            job_func,
+            catalog_id=str(catalog_id),
+            backend=backend,
+            model=model,
+            threshold=threshold,
+            max_tags=max_tags,
+            max_images=max_images,
+            tag_mode=tag_mode,
+            continue_pipeline=continue_pipeline,
+        )
 
     logger.info(
         f"Started auto-tagging job {job.id} for catalog {catalog_id} "
@@ -1675,7 +1679,6 @@ def start_auto_tagging(
 
     return {
         "job_id": str(job.id),
-        "task_id": task.id,
         "status": "pending",
         "message": f"Auto-tagging started for catalog {catalog.name} with {backend} backend",
     }

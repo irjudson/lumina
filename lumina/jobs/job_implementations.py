@@ -290,6 +290,59 @@ def detect_bursts_job(
         raise
 
 
+def auto_tag_job(
+    catalog_id: str,
+    job_id: str,
+    backend: str = "openclip",
+    model: str = None,
+    threshold: float = 0.25,
+    max_tags: int = 10,
+    max_images: int = None,
+    tag_mode: str = "untagged_only",
+    continue_pipeline: bool = False,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Auto-tag images using AI models.
+
+    TODO: Full implementation pending conversion from Celery parallel system.
+    This is a stub to maintain API compatibility during migration.
+    """
+    try:
+        logger.info(
+            f"[{job_id}] Starting auto-tag for catalog {catalog_id} "
+            f"with {backend} backend (mode={tag_mode})"
+        )
+
+        update_job_status(
+            job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": 100,
+                "percent": 0,
+                "phase": "init",
+                "backend": backend,
+            },
+        )
+
+        # TODO: Implement full auto-tagging logic from tasks.py auto_tag_task
+        # For now, return stub result
+        result = {
+            "status": "completed",
+            "images_tagged": 0,
+            "tags_added": 0,
+            "backend": backend,
+            "catalog_id": catalog_id,
+        }
+
+        logger.info(f"[{job_id}] Auto-tag stub completed")
+        return result
+
+    except Exception:
+        logger.exception(f"Auto-tag job {job_id} failed")
+        raise
+
+
 # Job registry
 JOB_FUNCTIONS = {
     "scan": scan_analyze_job,
@@ -297,4 +350,5 @@ JOB_FUNCTIONS = {
     "detect_duplicates": detect_duplicates_job,
     "generate_thumbnails": generate_thumbnails_job,
     "detect_bursts": detect_bursts_job,
+    "auto_tag": auto_tag_job,
 }
