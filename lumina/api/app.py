@@ -2,7 +2,6 @@
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +9,8 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..db import init_db
-from .routers import catalogs  # , jobs  # TODO: Re-enable after Celery removal refactor
+from .routers import catalogs
+from .routers import jobs_new as jobs
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,7 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
-    # app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])  # TODO: Re-enable
+    app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 
     # Health check endpoint
     @app.get("/health")

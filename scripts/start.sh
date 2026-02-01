@@ -44,6 +44,10 @@ echo "Setting up database..."
 su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_user WHERE usename = 'pg'\" | grep -q 1 || psql -U postgres -c \"CREATE USER pg WITH SUPERUSER PASSWORD 'buffalo-jump';\""
 su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'lumina'\" | grep -q 1 || psql -U postgres -c \"CREATE DATABASE lumina OWNER pg;\""
 
+# Enable pgvector extension
+echo "Enabling pgvector extension..."
+su - postgres -c "psql -U postgres -d lumina -c 'CREATE EXTENSION IF NOT EXISTS vector;'"
+
 echo "PostgreSQL is ready"
 
 # Run database migrations if needed

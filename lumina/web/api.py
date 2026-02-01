@@ -18,19 +18,12 @@ from PIL import Image, ImageOps
 from pydantic import BaseModel
 
 from ..analysis.semantic_search import SearchResult, SemanticSearchService
+from ..api.routers import jobs_new as jobs
 from ..api.routers.catalogs import load_image_any_format
 from ..core.types import ImageRecord
 from ..db import CatalogDB as CatalogDatabase
 from ..shared.preview_cache import PreviewCache
 from .catalogs_api import router as catalogs_router
-
-# from .jobs_api import router as jobs_router  # TODO: Refactor after Celery removal
-
-# Import burst detection task for job submission
-try:
-    from ..jobs.tasks import detect_bursts_task
-except ImportError:
-    detect_bursts_task = None
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +39,17 @@ except ImportError:
     )
 
 app = FastAPI(title="Lumina Catalog Viewer", version="2.0.0")
+
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database tables on startup."""
+    from ..db import init_db
+
+    logger.info("Initializing database...")
+    init_db()
+    logger.info("Database initialized")
 
 
 # Health check endpoint
@@ -71,7 +75,7 @@ app.add_middleware(
 )
 
 # Include routers
-# app.include_router(jobs_router)  # TODO: Re-enable after Celery removal
+app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
 app.include_router(catalogs_router)
 
 # Mount static files directory
@@ -2049,19 +2053,22 @@ async def start_burst_detection(
         gap_threshold: Maximum seconds between burst images
         min_burst_size: Minimum images to form a burst
     """
-    if detect_bursts_task is None:
-        raise HTTPException(
-            status_code=500, detail="Burst detection task not available"
-        )
+    from ..jobs.background_jobs import create_job, run_job_in_background
 
-    task = detect_bursts_task.delay(
+    job_id = create_job(
+        job_type="detect_bursts",
         catalog_id=catalog_id,
-        gap_threshold=gap_threshold,
-        min_burst_size=min_burst_size,
+        parameters={
+            "catalog_id": catalog_id,
+            "gap_threshold": gap_threshold,
+            "min_burst_size": min_burst_size,
+        },
     )
 
+    run_job_in_background(job_id)
+
     return {
-        "job_id": task.id,
+        "job_id": job_id,
         "status": "queued",
         "message": "Burst detection job started",
     }

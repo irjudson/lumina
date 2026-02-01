@@ -14,8 +14,20 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     postgresql-14 \
     postgresql-client-14 \
+    postgresql-server-dev-14 \
+    git \
+    build-essential \
     sudo \
     && rm -rf /var/lib/apt/lists/*
+
+# Install pgvector extension from source
+RUN cd /tmp && \
+    git clone --branch v0.5.1 https://github.com/pgvector/pgvector.git && \
+    cd pgvector && \
+    make && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/pgvector
 
 # Set Python 3.11 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 && \

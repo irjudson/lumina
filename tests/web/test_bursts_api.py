@@ -354,8 +354,10 @@ class TestDetectBurstsEndpoint:
 
     def test_start_burst_detection_job(self, client, test_catalog_id, mock_catalog_db):
         """Test starting a burst detection job."""
-        with patch("lumina.web.api.detect_bursts_task") as mock_task:
-            mock_task.delay.return_value.id = "job-123"
+        with patch("lumina.jobs.background_jobs.create_job") as mock_create, patch(
+            "lumina.jobs.background_jobs.run_job_in_background"
+        ) as mock_run:
+            mock_create.return_value = "job-123"
 
             response = client.post(f"/api/catalogs/{test_catalog_id}/detect-bursts")
 
@@ -366,19 +368,25 @@ class TestDetectBurstsEndpoint:
             assert data["status"] == "queued"
             assert "message" in data
 
-            # Verify task was called with correct parameters
-            mock_task.delay.assert_called_once()
-            call_kwargs = mock_task.delay.call_args.kwargs
-            assert call_kwargs["catalog_id"] == test_catalog_id
-            assert call_kwargs["gap_threshold"] == 2.0
-            assert call_kwargs["min_burst_size"] == 3
+            # Verify create_job was called with correct parameters
+            mock_create.assert_called_once()
+            call_args = mock_create.call_args
+            assert call_args.kwargs["job_type"] == "detect_bursts"
+            assert call_args.kwargs["catalog_id"] == test_catalog_id
+            assert call_args.kwargs["parameters"]["gap_threshold"] == 2.0
+            assert call_args.kwargs["parameters"]["min_burst_size"] == 3
+
+            # Verify run_job_in_background was called with job_id
+            mock_run.assert_called_once_with("job-123")
 
     def test_start_burst_detection_with_custom_params(
         self, client, test_catalog_id, mock_catalog_db
     ):
         """Test starting burst detection with custom parameters."""
-        with patch("lumina.web.api.detect_bursts_task") as mock_task:
-            mock_task.delay.return_value.id = "job-456"
+        with patch("lumina.jobs.background_jobs.create_job") as mock_create, patch(
+            "lumina.jobs.background_jobs.run_job_in_background"
+        ):
+            mock_create.return_value = "job-456"
 
             response = client.post(
                 f"/api/catalogs/{test_catalog_id}/detect-bursts?gap_threshold=1.5&min_burst_size=5"
@@ -386,7 +394,7 @@ class TestDetectBurstsEndpoint:
 
             assert response.status_code == 202
 
-            # Verify task was called with custom parameters
-            call_kwargs = mock_task.delay.call_args.kwargs
-            assert call_kwargs["gap_threshold"] == 1.5
-            assert call_kwargs["min_burst_size"] == 5
+            # Verify create_job was called with custom parameters
+            call_args = mock_create.call_args
+            assert call_args.kwargs["parameters"]["gap_threshold"] == 1.5
+            assert call_args.kwargs["parameters"]["min_burst_size"] == 5

@@ -30,7 +30,7 @@ class Job(Base):
 
     __tablename__ = "jobs"
 
-    id: Mapped[str] = mapped_column(String(255), primary_key=True)  # Celery task ID
+    id: Mapped[str] = mapped_column(String(255), primary_key=True)  # Job ID
     catalog_id: Mapped[Optional[uuid_module.UUID]] = mapped_column(
         UUID(as_uuid=True), nullable=True
     )  # Optional catalog reference
@@ -43,6 +43,9 @@ class Job(Base):
     parameters: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB, nullable=True
     )  # Job parameters (directories, options, etc.)
+    progress: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True
+    )  # Progress information (current, total, percent, phase)
     result: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         JSONB, nullable=True
     )  # Final result when complete
@@ -55,6 +58,9 @@ class Job(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )  # When job completed (success or failure)
 
     def __repr__(self) -> str:
         return f"<Job(id={self.id}, type={self.job_type}, status={self.status})>"

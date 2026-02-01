@@ -1,6 +1,4 @@
 """Tests for job metrics tracking."""
-import pytest
-pytestmark = pytest.mark.skip(reason="Jobs being migrated from Celery to FastAPI BackgroundTasks")
 
 from datetime import datetime
 from unittest.mock import MagicMock, patch

@@ -9,13 +9,9 @@ from unittest.mock import Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-# Skip all tests in this module during Celery -> FastAPI BackgroundTasks migration
-pytestmark = pytest.mark.skip(reason="Jobs API being migrated from Celery to FastAPI BackgroundTasks")
-
-from lumina.api.app import create_app
-from lumina.api.routers.jobs_stub import _safe_get_task_info, _safe_get_task_state
 from lumina.db import get_db
 from lumina.db.models import Job
+from lumina.web.api import app
 
 pytestmark = pytest.mark.integration
 
@@ -25,72 +21,17 @@ def unique_job_id(prefix: str = "test-job") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
 
 
-class TestSafeTaskAccessors:
-    """Tests for safe Celery task accessor functions."""
-
-    def test_safe_get_task_state_normal(self):
-        """Test _safe_get_task_state with normal task."""
-        mock_task = Mock()
-        mock_task.state = "SUCCESS"
-
-        result = _safe_get_task_state(mock_task)
-        assert result == "SUCCESS"
-
-    def test_safe_get_task_state_with_value_error(self):
-        """Test _safe_get_task_state when task.state raises ValueError.
-
-        This simulates the error that occurs when the Celery result backend
-        has malformed exception info (missing 'exc_type' key).
-        """
-        mock_task = Mock()
-        mock_task.id = "test-task-123"
-        # Simulate the ValueError that Celery raises
-        type(mock_task).state = property(
-            lambda self: (_ for _ in ()).throw(
-                ValueError("Exception information must include the exception type")
-            )
-        )
-
-        result = _safe_get_task_state(mock_task)
-        assert result == "FAILURE"
-
-    def test_safe_get_task_info_normal(self):
-        """Test _safe_get_task_info with normal task."""
-        mock_task = Mock()
-        mock_task.info = {"current": 50, "total": 100}
-
-        result = _safe_get_task_info(mock_task)
-        assert result == {"current": 50, "total": 100}
-
-    def test_safe_get_task_info_with_value_error(self):
-        """Test _safe_get_task_info when task.info raises ValueError."""
-        mock_task = Mock()
-        mock_task.id = "test-task-123"
-        type(mock_task).info = property(
-            lambda self: (_ for _ in ()).throw(
-                ValueError("Exception information must include the exception type")
-            )
-        )
-
-        result = _safe_get_task_info(mock_task)
-        assert "error" in result
-        assert "Failed to retrieve task info" in result["error"]
-
-
-class TestJobStatusEndpoint:
-    """Tests for GET /api/jobs/{job_id} endpoint."""
+class TestJobEndpoints:
+    """Tests for job API endpoints."""
 
     @pytest.fixture
     def client(self):
         """Create a test client for the FastAPI application."""
-        app = create_app()
-        with TestClient(app) as test_client:
-            yield test_client
+        return TestClient(app)
 
     @pytest.fixture
     def db_session(self, client):
         """Get a database session for creating test jobs."""
-        # Use the same dependency override mechanism as the app
         db_gen = get_db()
         db = next(db_gen)
         try:
@@ -101,150 +42,198 @@ class TestJobStatusEndpoint:
             except StopIteration:
                 pass
 
-    def _create_test_job(self, db_session, job_id: str, status: str = "PENDING"):
+    def _create_test_job(
+        self,
+        db_session,
+        job_id: str,
+        status: str = "PENDING",
+        progress: dict = None,
+        result: dict = None,
+        error: str = None,
+    ):
         """Create a test job in the database."""
         job = Job(
             id=job_id,
             job_type="scan",
             status=status,
             parameters={},
+            progress=progress,
+            result=result,
+            error=error,
         )
         db_session.add(job)
         db_session.commit()
         return job
 
-    @patch("lumina.api.routers.jobs.AsyncResult")
-    def test_get_job_status_success(self, mock_async_result, client, db_session):
-        """Test get_job_status with a successful task.
+    def test_health_endpoint(self, client):
+        """Test jobs health endpoint."""
+        response = client.get("/api/jobs/health")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "healthy"
+        assert data["backend"] == "threading"
 
-        Note: The API now returns standardized status values:
-        - "completed" instead of "SUCCESS"
-        - "running" instead of "PROGRESS"
-        - "failed" instead of "FAILURE"
-        - "killed" instead of "REVOKED"
-        - "queued" instead of "PENDING"
-        """
-        # Create job in database first with unique ID for parallel test isolation
+    def test_get_job_success(self, client, db_session):
+        """Test getting a completed job."""
         job_id = unique_job_id("success")
-        # Job needs SUCCESS status with completed result to map to "completed"
-        job = Job(
-            id=job_id,
-            job_type="scan",
+        self._create_test_job(
+            db_session,
+            job_id,
             status="SUCCESS",
-            parameters={},
-            result={"status": "completed", "files_processed": 100},
+            result={"files_processed": 100, "files_added": 50},
         )
-        db_session.add(job)
-        db_session.commit()
-
-        mock_task = Mock()
-        mock_task.state = "SUCCESS"
-        mock_task.result = {"status": "completed", "files_processed": 100}
-        mock_async_result.return_value = mock_task
 
         response = client.get(f"/api/jobs/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["job_id"] == job_id
-        assert data["status"] == "completed"  # Standardized status
-        assert data["celery_status"] == "SUCCESS"  # Raw Celery status
+        assert data["id"] == job_id
+        assert data["status"] == "SUCCESS"
         assert data["result"]["files_processed"] == 100
+        assert data["result"]["files_added"] == 50
 
-    @patch("lumina.api.routers.jobs.AsyncResult")
-    def test_get_job_status_progress(self, mock_async_result, client, db_session):
-        """Test get_job_status with an in-progress task."""
-        # Create job in database first with unique ID for parallel test isolation
+    def test_get_job_progress(self, client, db_session):
+        """Test getting an in-progress job."""
         job_id = unique_job_id("progress")
-        # Job in PROGRESS state maps to "running"
-        job = Job(
-            id=job_id,
-            job_type="scan",
+        self._create_test_job(
+            db_session,
+            job_id,
             status="PROGRESS",
-            parameters={},
+            progress={"current": 50, "total": 100, "percent": 50},
         )
-        db_session.add(job)
-        db_session.commit()
-
-        mock_task = Mock()
-        mock_task.state = "PROGRESS"
-        mock_task.info = {"current": 50, "total": 100}
-        mock_async_result.return_value = mock_task
 
         response = client.get(f"/api/jobs/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "running"  # Standardized status
-        assert data["celery_status"] == "PROGRESS"  # Raw Celery status
+        assert data["id"] == job_id
+        assert data["status"] == "PROGRESS"
+        assert data["progress"]["current"] == 50
+        assert data["progress"]["total"] == 100
+        assert data["progress"]["percent"] == 50
 
-    @patch("lumina.api.routers.jobs.AsyncResult")
-    def test_get_job_status_failure(self, mock_async_result, client, db_session):
-        """Test get_job_status with a failed task."""
-        # Create job in database first with unique ID for parallel test isolation
+    def test_get_job_failure(self, client, db_session):
+        """Test getting a failed job."""
         job_id = unique_job_id("failure")
-        # Job in FAILURE state maps to "failed"
-        job = Job(
-            id=job_id,
-            job_type="scan",
-            status="FAILURE",
-            parameters={},
-            error="Task failed due to error",
+        self._create_test_job(
+            db_session, job_id, status="FAILURE", error="Task failed due to error"
         )
-        db_session.add(job)
-        db_session.commit()
-
-        mock_task = Mock()
-        mock_task.state = "FAILURE"
-        mock_task.info = Exception("Task failed due to error")
-        mock_async_result.return_value = mock_task
 
         response = client.get(f"/api/jobs/{job_id}")
 
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "failed"  # Standardized status
-        assert data["celery_status"] == "FAILURE"  # Raw Celery status
+        assert data["id"] == job_id
+        assert data["status"] == "FAILURE"
         assert data["error"] == "Task failed due to error"
 
-    @patch("lumina.api.routers.jobs.AsyncResult")
-    def test_get_job_status_malformed_exception_info(
-        self, mock_async_result, client, db_session
-    ):
-        """Test get_job_status handles malformed Celery exception info gracefully.
+    def test_get_job_not_found(self, client):
+        """Test getting a non-existent job."""
+        response = client.get("/api/jobs/nonexistent-job-id")
+        assert response.status_code == 404
+        data = response.json()
+        assert "not found" in data["detail"].lower()
 
-        This is a regression test for the ValueError that occurs when the Celery
-        result backend stores exception info without the required 'exc_type' key.
-        The endpoint should return a FAILURE status instead of a 500 error.
-        """
-        # Create job in database first with unique ID for parallel test isolation
-        # Use FAILURE status since malformed exception info means the task failed
-        job_id = unique_job_id("malformed")
-        self._create_test_job(db_session, job_id, "FAILURE")
-
-        mock_task = Mock()
-        mock_task.id = job_id
-
-        # Simulate the error: accessing .state raises ValueError
-        # because the exception info in the result backend is malformed
-        type(mock_task).state = property(
-            lambda self: (_ for _ in ()).throw(
-                ValueError("Exception information must include the exception type")
-            )
-        )
-        # Also make .info raise the same error
-        type(mock_task).info = property(
-            lambda self: (_ for _ in ()).throw(
-                ValueError("Exception information must include the exception type")
-            )
-        )
-        mock_async_result.return_value = mock_task
-
-        response = client.get(f"/api/jobs/{job_id}")
-
-        # Should NOT be a 500 error - should be handled gracefully
+    def test_list_jobs_empty(self, client):
+        """Test listing jobs when none exist."""
+        response = client.get("/api/jobs/")
         assert response.status_code == 200
         data = response.json()
-        assert data["job_id"] == job_id
-        assert data["status"] == "failed"  # Standardized status (mapped from FAILURE)
-        assert data["celery_status"] == "FAILURE"  # Raw Celery status for debugging
+        assert isinstance(data, list)
+        # May have other jobs from other tests due to shared DB
+
+    def test_list_jobs_with_jobs(self, client, db_session):
+        """Test listing jobs."""
+        job_id1 = unique_job_id("list1")
+        job_id2 = unique_job_id("list2")
+
+        self._create_test_job(db_session, job_id1, status="SUCCESS")
+        self._create_test_job(db_session, job_id2, status="PROGRESS")
+
+        response = client.get("/api/jobs/")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+
+        # Find our test jobs in the list
+        job_ids = [job["id"] for job in data]
+        assert job_id1 in job_ids
+        assert job_id2 in job_ids
+
+    def test_cancel_job_pending(self, client, db_session):
+        """Test canceling a pending job."""
+        job_id = unique_job_id("cancel")
+        self._create_test_job(db_session, job_id, status="PENDING")
+
+        response = client.delete(f"/api/jobs/{job_id}")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "cancelled" in data["message"].lower()
+
+        # Verify job was marked as failed
+        db_session.expire_all()
+        job = db_session.query(Job).filter(Job.id == job_id).first()
+        assert job.status == "FAILURE"
+        assert "Cancelled" in job.error
+
+    def test_cancel_job_completed(self, client, db_session):
+        """Test attempting to cancel a completed job."""
+        job_id = unique_job_id("completed")
+        self._create_test_job(db_session, job_id, status="SUCCESS")
+
+        response = client.delete(f"/api/jobs/{job_id}")
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "cannot cancel" in data["detail"].lower()
+
+    def test_cancel_job_not_found(self, client):
+        """Test canceling a non-existent job."""
+        response = client.delete("/api/jobs/nonexistent-job-id")
+        assert response.status_code == 404
+
+    @patch("lumina.jobs.background_jobs.run_job_in_background")
+    def test_submit_job(self, mock_run_job, client, db_session):
+        """Test submitting a new job."""
+        # Mock the background job runner
+        mock_run_job.return_value = None
+
+        response = client.post(
+            "/api/jobs/submit",
+            json={
+                "catalog_id": str(uuid.uuid4()),
+                "job_type": "scan",
+                "parameters": {
+                    "catalog_id": str(uuid.uuid4()),
+                    "source_paths": ["/test/path"],
+                    "workers": 4,
+                },
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "id" in data
+        assert data["status"] == "PENDING"
+
+        # Verify job was created in database
+        job = db_session.query(Job).filter(Job.id == data["id"]).first()
+        assert job is not None
+        assert job.job_type == "scan"
+        assert job.status == "PENDING"
+
+    def test_submit_job_invalid_type(self, client):
+        """Test submitting a job with invalid type."""
+        response = client.post(
+            "/api/jobs/submit",
+            json={
+                "catalog_id": str(uuid.uuid4()),
+                "job_type": "invalid_job_type",
+                "parameters": {},
+            },
+        )
+
+        assert response.status_code == 400
+        data = response.json()
+        assert "unknown job type" in data["detail"].lower()
