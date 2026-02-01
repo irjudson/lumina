@@ -1,26 +1,26 @@
 """
 Parallel Thumbnail Generation using the Coordinator Pattern.
 
-This module implements parallel thumbnail generation across multiple Celery workers:
+This module implements parallel thumbnail generation across multiple threading workers:
 
-1. thumbnail_coordinator_task: Queries images, creates batches, spawns workers
-2. thumbnail_worker_task: Processes a batch of images
-3. thumbnail_finalizer_task: Aggregates results
+1. thumbnail_coordinator: Queries images, creates batches, spawns workers
+2. thumbnail_worker: Processes a batch of images
+3. thumbnail_finalizer: Aggregates results
 """
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import Future, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from celery import chord, group
 from sqlalchemy import text
 
 from ..db import CatalogDB as CatalogDatabase
 from ..db.models import Job
 from ..shared.thumbnail_utils import generate_thumbnail
-from .celery_app import app
+from .background_jobs import get_executor, update_job_status
 from .coordinator import (
     CONSECUTIVE_FAILURE_THRESHOLD,
     BatchManager,
@@ -29,12 +29,11 @@ from .coordinator import (
     publish_job_progress,
 )
 from .progress_publisher import publish_completion, publish_progress
-from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
 
 
-def _update_job_status(
+def _update_job_status_db(
     job_id: str,
     status: str,
     result: Optional[Dict[str, Any]] = None,
@@ -58,9 +57,8 @@ def _update_job_status(
         logger.warning(f"Failed to update job status for {job_id}: {e}")
 
 
-@app.task(bind=True, base=CoordinatorTask, name="thumbnail_coordinator")
-def thumbnail_coordinator_task(
-    self: CoordinatorTask,
+def thumbnail_coordinator(
+    job_id: str,
     catalog_id: str,
     sizes: Optional[List[int]] = None,
     quality: int = 85,
@@ -68,16 +66,20 @@ def thumbnail_coordinator_task(
     batch_size: int = 500,
 ) -> Dict[str, Any]:
     """
-    Coordinator task for parallel thumbnail generation.
+    Coordinator function for parallel thumbnail generation.
 
     Args:
+        job_id: Job ID for this thumbnail generation
         catalog_id: UUID of the catalog
         sizes: List of thumbnail sizes (default: [256, 512])
         quality: JPEG quality (1-100)
         force: Regenerate existing thumbnails
         batch_size: Number of images per batch
+
+    Returns:
+        Final aggregated results
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(
         f"[{parent_job_id}] Starting thumbnail coordinator for catalog {catalog_id}"
     )
@@ -86,7 +88,11 @@ def thumbnail_coordinator_task(
         sizes = [256, 512]
 
     try:
-        self.update_progress(0, 1, "Querying images...", {"phase": "init"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "init"},
+        )
 
         # Get all image IDs that need thumbnails
         with CatalogDatabase(catalog_id) as db:
@@ -113,11 +119,14 @@ def thumbnail_coordinator_task(
             return {"status": "completed", "message": "No images to process"}
 
         # Create batches
-        self.update_progress(
-            0,
-            total_images,
-            f"Creating batches for {total_images} images...",
-            {"phase": "batching"},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_images,
+                "phase": "batching",
+            },
         )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "thumbnails")
@@ -132,55 +141,20 @@ def thumbnail_coordinator_task(
         num_batches = len(batch_ids)
         logger.info(f"[{parent_job_id}] Created {num_batches} batches")
 
-        # Spawn workers via chord
-        self.update_progress(
-            0,
-            total_images,
-            f"Spawning {num_batches} sub-tasks...",
-            {"phase": "spawning"},
-        )
-
-        worker_tasks = group(
-            thumbnail_worker_task.s(
-                catalog_id=catalog_id,
-                batch_id=batch_id,
-                parent_job_id=parent_job_id,
-                sizes=sizes,
-                quality=quality,
-                force=force,
-            )
-            for batch_id in batch_ids
-        )
-
-        finalizer = thumbnail_finalizer_task.s(
-            catalog_id=catalog_id,
-            parent_job_id=parent_job_id,
-            sizes=sizes,
-            quality=quality,
-            force=force,
-            batch_size=batch_size,
-        )
-
-        chord(worker_tasks)(finalizer)
-
-        # Start progress monitoring using generic monitor (job_batches mode)
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="thumbnails",
-            use_celery_backend=False,  # Use job_batches table for tracking
-            countdown=30,
-        )
-
-        logger.info(
-            f"[{parent_job_id}] Chord dispatched: {num_batches} sub-tasks → finalizer"
+        # Spawn worker threads
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": 0,
+                "total": total_images,
+                "phase": "spawning",
+                "num_batches": num_batches,
+            },
         )
 
         # Set job to STARTED state - workers are now processing
-        # The finalizer will update to SUCCESS when all batches complete
-        _update_job_status(
+        _update_job_status_db(
             parent_job_id,
             "STARTED",
             result={
@@ -200,13 +174,55 @@ def thumbnail_coordinator_task(
             extra={"phase": "processing", "batches_total": num_batches},
         )
 
-        return {
-            "status": "dispatched",
-            "catalog_id": catalog_id,
-            "total_images": total_images,
-            "num_batches": num_batches,
-            "message": f"Processing {total_images} images in {num_batches} batches",
-        }
+        # Execute workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: Dict[Future, str] = {}
+
+        for batch_id in batch_ids:
+            future = executor.submit(
+                thumbnail_worker,
+                catalog_id=catalog_id,
+                batch_id=batch_id,
+                parent_job_id=parent_job_id,
+                sizes=sizes,
+                quality=quality,
+                force=force,
+            )
+            futures[future] = batch_id
+
+        # Wait for all workers to complete and collect results
+        worker_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                worker_result = future.result()
+                worker_results.append(worker_result)
+            except Exception as e:
+                batch_id = futures[future]
+                logger.error(f"Worker for batch {batch_id} raised exception: {e}")
+                worker_results.append(
+                    {
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        logger.info(
+            f"[{parent_job_id}] All {num_batches} workers complete, running finalizer"
+        )
+
+        # Run finalizer
+        final_result = thumbnail_finalizer(
+            worker_results=worker_results,
+            catalog_id=catalog_id,
+            parent_job_id=parent_job_id,
+            sizes=sizes,
+            quality=quality,
+            force=force,
+            batch_size=batch_size,
+        )
+
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
@@ -214,9 +230,7 @@ def thumbnail_coordinator_task(
         raise
 
 
-@app.task(bind=True, name="thumbnail_worker")
-def thumbnail_worker_task(
-    self: Any,
+def thumbnail_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
@@ -224,8 +238,22 @@ def thumbnail_worker_task(
     quality: int,
     force: bool,
 ) -> Dict[str, Any]:
-    """Worker task that processes a batch of images for thumbnails."""
-    worker_id = self.request.id or "unknown"
+    """Worker function that processes a batch of images for thumbnails.
+
+    Args:
+        catalog_id: UUID of the catalog
+        batch_id: UUID of the batch to process
+        parent_job_id: Coordinator's job ID (for progress publishing)
+        sizes: List of thumbnail sizes to generate
+        quality: JPEG quality (1-100)
+        force: Regenerate existing thumbnails
+
+    Returns:
+        BatchResult dictionary
+    """
+    import threading
+
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting thumbnail worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "thumbnails")
@@ -311,9 +339,7 @@ def thumbnail_worker_task(
         return {"batch_id": batch_id, "status": "failed", "error": str(e)}
 
 
-@app.task(bind=True, base=ProgressTask, name="thumbnail_finalizer")
-def thumbnail_finalizer_task(
-    self: ProgressTask,
+def thumbnail_finalizer(
     worker_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
@@ -326,12 +352,28 @@ def thumbnail_finalizer_task(
 
     If there are too many failed batches, automatically queues a continuation
     job to process remaining images without thumbnails.
+
+    Args:
+        worker_results: List of results from all worker tasks
+        catalog_id: UUID of the catalog
+        parent_job_id: Coordinator's job ID
+        sizes: List of thumbnail sizes
+        quality: JPEG quality (1-100)
+        force: Regenerate existing thumbnails
+        batch_size: Number of images per batch
+
+    Returns:
+        Final aggregated results
     """
-    finalizer_id = self.request.id or "unknown"
+    finalizer_id = parent_job_id
     logger.info(f"[{finalizer_id}] Starting finalizer for job {parent_job_id}")
 
     try:
-        self.update_progress(0, 1, "Aggregating results...", {"phase": "finalizing"})
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={"current": 0, "total": 1, "phase": "finalizing"},
+        )
 
         batch_manager = BatchManager(catalog_id, parent_job_id, "thumbnails")
 
@@ -360,7 +402,7 @@ def thumbnail_finalizer_task(
                 parent_job_id=parent_job_id,
                 catalog_id=catalog_id,
                 job_type="thumbnails",
-                task_name="thumbnail_coordinator",
+                task_name="thumbnail_coordinator",  # Legacy parameter, not used in threading system
                 task_kwargs={
                     "catalog_id": catalog_id,
                     "sizes": sizes or [256, 512],
@@ -390,13 +432,16 @@ def thumbnail_finalizer_task(
         }
 
         publish_completion(parent_job_id, "SUCCESS", result=final_result)
-        _update_job_status(parent_job_id, "SUCCESS", result=final_result)
+        _update_job_status_db(parent_job_id, "SUCCESS", result=final_result)
 
-        self.update_progress(
-            progress.total_items,
-            progress.total_items,
-            f"Complete: {total_success} thumbnails generated",
-            {"phase": "complete"},
+        update_job_status(
+            parent_job_id,
+            "PROGRESS",
+            progress={
+                "current": progress.total_items,
+                "total": progress.total_items,
+                "phase": "complete",
+            },
         )
 
         logger.info(
@@ -408,5 +453,5 @@ def thumbnail_finalizer_task(
     except Exception as e:
         logger.error(f"[{finalizer_id}] Finalizer failed: {e}", exc_info=True)
         publish_completion(parent_job_id, "FAILURE", error=str(e))
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        _update_job_status_db(parent_job_id, "FAILURE", error=str(e))
         raise
