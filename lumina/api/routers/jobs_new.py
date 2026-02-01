@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...db.models import Job
+from ...jobs.background_jobs import cancel_job as cancel_job_bg
 from ...jobs.background_jobs import create_job, run_job_in_background
 from ...jobs.job_implementations import JOB_FUNCTIONS
 
@@ -126,8 +127,13 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     if job.status in ("SUCCESS", "FAILURE"):
         raise HTTPException(status_code=400, detail="Cannot cancel completed job")
 
-    job.status = "FAILURE"
-    job.error = "Cancelled by user"
-    db.commit()
+    # Try to cancel the running job
+    cancelled = cancel_job_bg(job_id)
+
+    if not cancelled:
+        # Job not running or already completed, mark as cancelled in DB
+        job.status = "FAILURE"
+        job.error = "Cancelled by user"
+        db.commit()
 
     return {"message": "Job cancelled"}

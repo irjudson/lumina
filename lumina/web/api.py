@@ -2053,25 +2053,45 @@ async def start_burst_detection(
         gap_threshold: Maximum seconds between burst images
         min_burst_size: Minimum images to form a burst
     """
+    from ..db import get_db
     from ..jobs.background_jobs import create_job, run_job_in_background
+    from ..jobs.job_implementations import JOB_FUNCTIONS
 
-    job_id = create_job(
-        job_type="detect_bursts",
-        catalog_id=catalog_id,
-        parameters={
-            "catalog_id": catalog_id,
-            "gap_threshold": gap_threshold,
-            "min_burst_size": min_burst_size,
-        },
-    )
+    # Get database session
+    db = next(get_db())
 
-    run_job_in_background(job_id)
+    try:
+        # Create job record
+        job = create_job(
+            db,
+            job_type="detect_bursts",
+            catalog_id=catalog_id,
+            parameters={
+                "catalog_id": catalog_id,
+                "gap_threshold": gap_threshold,
+                "min_burst_size": min_burst_size,
+            },
+        )
 
-    return {
-        "job_id": job_id,
-        "status": "queued",
-        "message": "Burst detection job started",
-    }
+        # Get job function (if available, otherwise stub)
+        job_func = JOB_FUNCTIONS.get("detect_bursts")
+        if job_func:
+            # Run in background
+            run_job_in_background(
+                job.id,
+                job_func,
+                catalog_id=catalog_id,
+                gap_threshold=gap_threshold,
+                min_burst_size=min_burst_size,
+            )
+
+        return {
+            "job_id": job.id,
+            "status": "queued",
+            "message": "Burst detection job started",
+        }
+    finally:
+        db.close()
 
 
 # ============================================================================

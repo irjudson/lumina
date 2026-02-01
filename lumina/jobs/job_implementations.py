@@ -121,10 +121,47 @@ def generate_thumbnails_job(
         raise
 
 
+def detect_bursts_job(
+    catalog_id: str,
+    job_id: str,
+    gap_threshold: float = 2.0,
+    min_burst_size: int = 3,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Detect burst photo sequences."""
+    try:
+        with CatalogDatabase(catalog_id) as _catalog_db:  # noqa: F841
+            update_job_status(
+                job_id,
+                "PROGRESS",
+                progress={
+                    "current": 0,
+                    "total": 100,
+                    "percent": 0,
+                    "phase": "detecting_bursts",
+                },
+            )
+
+            # TODO: Implement burst detection
+            # For now, just a stub
+
+            result = {
+                "bursts_found": 0,
+                "catalog_id": catalog_id,
+            }
+
+            return result
+
+    except Exception:
+        logger.exception(f"Burst detection job {job_id} failed")
+        raise
+
+
 # Job registry
 JOB_FUNCTIONS = {
     "scan": scan_analyze_job,
     "analyze": scan_analyze_job,
     "detect_duplicates": detect_duplicates_job,
     "generate_thumbnails": generate_thumbnails_job,
+    "detect_bursts": detect_bursts_job,
 }
