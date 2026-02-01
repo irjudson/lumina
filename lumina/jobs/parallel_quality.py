@@ -11,6 +11,7 @@ Updates the quality_score column in the database.
 """
 
 import logging
+from concurrent.futures import Future, as_completed
 from typing import Any, Dict, List
 
 from sqlalchemy import text
@@ -18,30 +19,29 @@ from sqlalchemy import text
 from ..analysis.quality_scorer import calculate_quality_score
 from ..core.types import FileType, ImageMetadata
 from ..db import CatalogDB as CatalogDatabase
-from .celery_app import app
+from .background_jobs import get_executor
 from .coordinator import BatchManager, BatchResult, publish_job_progress
-from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
 
 
-@app.task(bind=True, base=CoordinatorTask, name="quality_coordinator")
-def quality_coordinator_task(
-    self: CoordinatorTask,
+def quality_coordinator(
+    job_id: str,
     catalog_id: str,
     force: bool = False,
 ) -> Dict[str, Any]:
     """
-    Coordinator task for quality scoring.
+    Coordinator function for quality scoring.
 
     Args:
+        job_id: Job ID for this quality scoring
         catalog_id: Catalog UUID
         force: If True, recompute scores even if already present
 
     Returns:
-        Job result summary
+        Final aggregated results
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(f"[{parent_job_id}] Starting quality scoring coordinator")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "quality")
@@ -115,67 +115,75 @@ def quality_coordinator_task(
                 phase="starting",
             )
 
-        # Dispatch worker tasks using chord pattern
-        # Chord runs all workers in parallel, then calls finalizer when all complete
-        from celery import chord
+        # Execute workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: Dict[Future, str] = {}
 
-        worker_tasks = [
-            quality_worker_task.s(
+        for batch_id in batch_ids:
+            future = executor.submit(
+                quality_worker,
                 catalog_id=catalog_id,
                 batch_id=batch_id,
                 parent_job_id=parent_job_id,
                 force=force,
             )
-            for batch_id in batch_ids
-        ]
+            futures[future] = batch_id
 
-        # Execute workers in parallel, then run finalizer
-        finalizer_callback = quality_finalizer_task.s(
-            catalog_id=catalog_id,
-            parent_job_id=parent_job_id,
-        )
-
-        chord(worker_tasks)(finalizer_callback)
-
-        # Start progress monitoring using generic monitor (job_batches mode)
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="quality",
-            use_celery_backend=False,  # Use job_batches table for tracking
-            countdown=30,
-        )
+        # Wait for all workers to complete and collect results
+        worker_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                worker_result = future.result()
+                worker_results.append(worker_result)
+            except Exception as e:
+                batch_id = futures[future]
+                logger.error(f"Worker for batch {batch_id} raised exception: {e}")
+                worker_results.append(
+                    {
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
 
         logger.info(
-            f"[{parent_job_id}] Quality chord dispatched: {total_batches} batches"
+            f"[{parent_job_id}] All {total_batches} workers complete, running finalizer"
         )
 
-        # Return immediately - workers will run asynchronously
-        return {
-            "status": "processing",
-            "job_type": "quality",
-            "catalog_id": catalog_id,
-            "total_batches": total_batches,
-            "message": f"Processing {total_images:,} images",
-        }
+        # Run finalizer
+        final_result = quality_finalizer(
+            worker_results=worker_results,
+            catalog_id=catalog_id,
+            parent_job_id=parent_job_id,
+        )
+
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
         raise
 
 
-@app.task(bind=True, base=ProgressTask, name="quality_worker")
-def quality_worker_task(
-    self: ProgressTask,
+def quality_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
     force: bool,
 ) -> Dict[str, Any]:
-    """Worker task that processes a batch of images for quality scoring."""
-    worker_id = self.request.id or "unknown"
+    """Worker function that processes a batch of images for quality scoring.
+
+    Args:
+        catalog_id: Catalog UUID
+        batch_id: UUID of the batch to process
+        parent_job_id: Coordinator's job ID (for progress publishing)
+        force: If True, recompute scores even if already present
+
+    Returns:
+        BatchResult dictionary
+    """
+    import threading
+
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting quality worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "quality")
@@ -301,14 +309,21 @@ def quality_worker_task(
         return {"batch_id": batch_id, "status": "failed", "error": str(e)}
 
 
-@app.task(bind=True, base=ProgressTask, name="quality_finalizer")
-def quality_finalizer_task(
-    self: ProgressTask,
+def quality_finalizer(
     worker_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
 ) -> Dict[str, Any]:
-    """Finalizer task that aggregates results and marks job complete."""
+    """Finalizer function that aggregates results and marks job complete.
+
+    Args:
+        worker_results: List of results from all worker tasks
+        catalog_id: Catalog UUID
+        parent_job_id: Coordinator's job ID
+
+    Returns:
+        Final aggregated results
+    """
     logger.info(f"[{parent_job_id}] Running quality finalizer")
 
     # Log worker results summary
