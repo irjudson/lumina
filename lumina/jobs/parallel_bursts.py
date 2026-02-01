@@ -1,11 +1,11 @@
 """
 Parallel Burst Detection using the Coordinator Pattern.
 
-This module implements parallel burst detection across Celery workers:
+This module implements parallel burst detection across multiple threading workers:
 
-1. burst_coordinator_task: Queries images, creates batches, spawns workers
-2. burst_worker_task: Processes a batch of images for burst detection
-3. burst_finalizer_task: Aggregates results and creates burst records
+1. burst_coordinator: Queries images, creates batches, spawns workers
+2. burst_worker: Processes a batch of images for burst detection
+3. burst_finalizer: Aggregates results and creates burst records
 
 Note: Burst detection works on time-sequential images. Batches are divided
 by time ranges so workers can detect bursts within their time window.
@@ -16,16 +16,15 @@ from __future__ import annotations
 
 import logging
 import uuid
+from concurrent.futures import Future, as_completed
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from celery import chord, group
 from sqlalchemy import text
 
 from ..analysis.burst_detector import BurstDetector, ImageInfo
 from ..db import CatalogDB as CatalogDatabase
-from ..db.models import Job
-from .celery_app import app
+from .background_jobs import get_executor
 from .coordinator import (
     CONSECUTIVE_FAILURE_THRESHOLD,
     BatchManager,
@@ -34,60 +33,38 @@ from .coordinator import (
     cancel_and_requeue_job,
     publish_job_progress,
 )
-from .progress_publisher import publish_completion, publish_progress
-from .tasks import CoordinatorTask, ProgressTask
 
 logger = logging.getLogger(__name__)
 
 
-def _update_job_status(
+def burst_coordinator(
     job_id: str,
-    status: str,
-    result: Optional[Dict[str, Any]] = None,
-    error: Optional[str] = None,
-) -> None:
-    """Update job status directly in the database."""
-    from ..db import get_db_context
-
-    try:
-        with get_db_context() as session:
-            job = session.query(Job).filter(Job.id == job_id).first()
-            if job:
-                job.status = status
-                if result is not None:
-                    job.result = result
-                if error is not None:
-                    job.error = error
-                session.commit()
-                logger.debug(f"Updated job {job_id} status to {status}")
-    except Exception as e:
-        logger.warning(f"Failed to update job status for {job_id}: {e}")
-
-
-@app.task(bind=True, base=CoordinatorTask, name="burst_coordinator")
-def burst_coordinator_task(
-    self: CoordinatorTask,
     catalog_id: str,
     gap_threshold: float = 2.0,
     min_burst_size: int = 3,
     batch_size: int = 5000,
 ) -> Dict[str, Any]:
     """
-    Coordinator task for parallel burst detection.
+    Coordinator function for parallel burst detection.
 
     Args:
+        job_id: Job ID for this burst detection
         catalog_id: UUID of the catalog
         gap_threshold: Maximum seconds between burst images
         min_burst_size: Minimum images to form a burst
         batch_size: Number of images per batch
+
+    Returns:
+        Final aggregated results
     """
-    parent_job_id = self.request.id or "unknown"
+    parent_job_id = job_id
     logger.info(
         f"[{parent_job_id}] Starting burst coordinator for catalog {catalog_id}"
     )
 
+    batch_manager = BatchManager(catalog_id, parent_job_id, "bursts")
+
     try:
-        self.update_progress(0, 1, "Querying images...", {"phase": "init"})
 
         # Clear existing bursts for this catalog
         with CatalogDatabase(catalog_id) as db:
@@ -157,26 +134,17 @@ def burst_coordinator_task(
         logger.info(f"[{parent_job_id}] Found {total_images} images with timestamps")
 
         if total_images == 0:
-            publish_completion(
-                parent_job_id,
-                "SUCCESS",
-                result={
-                    "status": "completed",
-                    "message": "No images with timestamps found",
-                },
-            )
-            return {"status": "completed", "message": "No images with timestamps found"}
+            logger.info(f"[{parent_job_id}] No images with timestamps found")
+            return {
+                "status": "completed",
+                "job_type": "bursts",
+                "catalog_id": catalog_id,
+                "bursts_detected": 0,
+                "total_burst_images": 0,
+                "message": "No images with timestamps found",
+            }
 
         # Create batches
-        self.update_progress(
-            0,
-            total_images,
-            f"Creating batches for {total_images} images...",
-            {"phase": "batching"},
-        )
-
-        batch_manager = BatchManager(catalog_id, parent_job_id, "bursts")
-
         with CatalogDatabase(catalog_id) as db:
             batch_ids = batch_manager.create_batches(
                 work_items=image_data,
@@ -184,99 +152,92 @@ def burst_coordinator_task(
                 db=db,
             )
 
-        num_batches = len(batch_ids)
-        logger.info(f"[{parent_job_id}] Created {num_batches} batches")
+            # Get total batches from progress
+            total_batches = len(batch_ids)
+            logger.info(f"[{parent_job_id}] Created {total_batches} batches")
 
-        # Spawn workers via chord
-        self.update_progress(
-            0,
-            total_images,
-            f"Spawning {num_batches} sub-tasks...",
-            {"phase": "spawning"},
-        )
+            # Publish initial progress
+            publish_job_progress(
+                parent_job_id,
+                batch_manager.get_progress(db),
+                f"Starting burst detection for {total_images:,} images",
+                phase="starting",
+            )
 
-        worker_tasks = group(
-            burst_worker_task.s(
+        # Execute workers in ThreadPoolExecutor
+        executor = get_executor()
+        futures: Dict[Future, str] = {}
+
+        for batch_id in batch_ids:
+            future = executor.submit(
+                burst_worker,
                 catalog_id=catalog_id,
                 batch_id=batch_id,
                 parent_job_id=parent_job_id,
                 gap_threshold=gap_threshold,
                 min_burst_size=min_burst_size,
             )
-            for batch_id in batch_ids
+            futures[future] = batch_id
+
+        # Wait for all workers to complete and collect results
+        worker_results: List[Dict[str, Any]] = []
+        for future in as_completed(futures):
+            try:
+                worker_result = future.result()
+                worker_results.append(worker_result)
+            except Exception as e:
+                batch_id = futures[future]
+                logger.error(f"Worker for batch {batch_id} raised exception: {e}")
+                worker_results.append(
+                    {
+                        "batch_id": batch_id,
+                        "status": "failed",
+                        "error": str(e),
+                    }
+                )
+
+        logger.info(
+            f"[{parent_job_id}] All {total_batches} workers complete, running finalizer"
         )
 
-        finalizer = burst_finalizer_task.s(
+        # Run finalizer
+        final_result = burst_finalizer(
+            worker_results=worker_results,
             catalog_id=catalog_id,
             parent_job_id=parent_job_id,
             gap_threshold=gap_threshold,
             min_burst_size=min_burst_size,
         )
 
-        chord(worker_tasks)(finalizer)
-
-        # Start progress monitoring using generic monitor (job_batches mode)
-        from .coordinator import start_chord_progress_monitor
-
-        start_chord_progress_monitor(
-            parent_job_id=parent_job_id,
-            catalog_id=catalog_id,
-            job_type="burst_detection",
-            use_celery_backend=False,  # Use job_batches table for tracking
-            countdown=30,
-        )
-
-        logger.info(
-            f"[{parent_job_id}] Chord dispatched: {num_batches} sub-tasks → finalizer"
-        )
-
-        # Set job to STARTED state - workers are now processing
-        # The finalizer will update to SUCCESS when all batches complete
-        _update_job_status(
-            parent_job_id,
-            "STARTED",
-            result={
-                "status": "processing",
-                "total_images": total_images,
-                "num_batches": num_batches,
-                "message": f"Processing {total_images} images in {num_batches} batches",
-            },
-        )
-
-        publish_progress(
-            parent_job_id,
-            "PROGRESS",
-            current=0,
-            total=total_images,
-            message=f"Processing {total_images} images in {num_batches} batches",
-            extra={"phase": "processing", "batches_total": num_batches},
-        )
-
-        return {
-            "status": "dispatched",
-            "catalog_id": catalog_id,
-            "total_images": total_images,
-            "num_batches": num_batches,
-            "message": f"Processing {total_images} images in {num_batches} batches",
-        }
+        return final_result
 
     except Exception as e:
         logger.error(f"[{parent_job_id}] Coordinator failed: {e}", exc_info=True)
-        publish_completion(parent_job_id, "FAILURE", error=str(e))
         raise
 
 
-@app.task(bind=True, name="burst_worker")
-def burst_worker_task(
-    self: Any,
+def burst_worker(
     catalog_id: str,
     batch_id: str,
     parent_job_id: str,
     gap_threshold: float,
     min_burst_size: int,
 ) -> Dict[str, Any]:
-    """Worker task that detects bursts within a batch of images."""
-    worker_id = self.request.id or "unknown"
+    """Worker function that detects bursts within a batch of images.
+
+    Args:
+        catalog_id: Catalog UUID
+        batch_id: UUID of the batch to process
+        parent_job_id: Coordinator's job ID (for progress publishing)
+        gap_threshold: Maximum seconds between burst images
+        min_burst_size: Minimum images to form a burst
+
+    Returns:
+        BatchResult dictionary
+    """
+    import threading
+
+    worker_id = f"thread-{threading.get_ident()}"
     logger.info(f"[{worker_id}] Starting burst worker for batch {batch_id}")
 
     batch_manager = BatchManager(catalog_id, parent_job_id, "bursts")
@@ -430,23 +391,39 @@ def burst_worker_task(
         return {"batch_id": batch_id, "status": "failed", "error": str(e)}
 
 
-@app.task(bind=True, base=ProgressTask, name="burst_finalizer")
-def burst_finalizer_task(
-    self: ProgressTask,
+def burst_finalizer(
     worker_results: List[Dict[str, Any]],
     catalog_id: str,
     parent_job_id: str,
     gap_threshold: float,
     min_burst_size: int,
 ) -> Dict[str, Any]:
-    """Finalizer that aggregates burst detection results and saves to database."""
-    finalizer_id = self.request.id or "unknown"
-    logger.info(f"[{finalizer_id}] Starting finalizer for job {parent_job_id}")
+    """Finalizer function that aggregates burst detection results and saves to database.
+
+    Args:
+        worker_results: List of results from all worker tasks
+        catalog_id: Catalog UUID
+        parent_job_id: Coordinator's job ID
+        gap_threshold: Maximum seconds between burst images
+        min_burst_size: Minimum images to form a burst
+
+    Returns:
+        Final aggregated results
+    """
+    logger.info(f"[{parent_job_id}] Running burst finalizer")
+
+    # Log worker results summary
+    total_workers = len(worker_results)
+    successful_workers = sum(
+        1 for r in worker_results if r.get("status") == "completed"
+    )
+    logger.info(
+        f"[{parent_job_id}] Worker results: {successful_workers}/{total_workers} completed"
+    )
+
+    batch_manager = BatchManager(catalog_id, parent_job_id, "bursts")
 
     try:
-        self.update_progress(
-            0, 1, "Aggregating burst results...", {"phase": "finalizing"}
-        )
 
         # Collect all bursts from workers, ordered by batch number
         all_bursts = []
@@ -459,7 +436,9 @@ def burst_finalizer_task(
             bursts = wr.get("bursts", [])
             all_bursts.extend(bursts)
 
-        logger.info(f"[{finalizer_id}] Collected {len(all_bursts)} bursts from workers")
+        logger.info(
+            f"[{parent_job_id}] Collected {len(all_bursts)} bursts from workers"
+        )
 
         # Check for bursts that span batch boundaries and merge them
         # A burst at the end of batch N might continue into batch N+1
@@ -467,15 +446,7 @@ def burst_finalizer_task(
             all_bursts, gap_threshold, min_burst_size
         )
 
-        logger.info(f"[{finalizer_id}] After merging: {len(merged_bursts)} bursts")
-
-        # Save bursts to database
-        self.update_progress(
-            0,
-            1,
-            f"Saving {len(merged_bursts)} bursts to database...",
-            {"phase": "saving"},
-        )
+        logger.info(f"[{parent_job_id}] After merging: {len(merged_bursts)} bursts")
 
         total_burst_images = 0
         with CatalogDatabase(catalog_id) as db:
@@ -540,8 +511,8 @@ def burst_finalizer_task(
             assert db.session is not None
             db.session.commit()
 
-        batch_manager = BatchManager(catalog_id, parent_job_id, "bursts")
         with CatalogDatabase(catalog_id) as db:
+            # Get final statistics
             progress = batch_manager.get_progress(db)
 
         failed_batches = sum(1 for wr in worker_results if wr.get("status") == "failed")
@@ -549,7 +520,7 @@ def burst_finalizer_task(
         # If there were too many failed batches, auto-requeue to continue
         if failed_batches >= CONSECUTIVE_FAILURE_THRESHOLD:
             logger.warning(
-                f"[{finalizer_id}] {failed_batches} batches failed, auto-requeuing continuation"
+                f"[{parent_job_id}] {failed_batches} batches failed, auto-requeuing continuation"
             )
 
             cancel_and_requeue_job(
@@ -569,6 +540,7 @@ def burst_finalizer_task(
 
             return {
                 "status": "requeued",
+                "job_type": "bursts",
                 "catalog_id": catalog_id,
                 "bursts_detected": len(merged_bursts),
                 "total_burst_images": total_burst_images,
@@ -578,32 +550,33 @@ def burst_finalizer_task(
 
         final_result = {
             "status": "completed" if failed_batches == 0 else "completed_with_errors",
+            "job_type": "bursts",
             "catalog_id": catalog_id,
             "bursts_detected": len(merged_bursts),
             "total_burst_images": total_burst_images,
+            "items_processed": progress.success_items + progress.error_items,
+            "items_success": progress.success_items,
+            "items_failed": progress.error_items,
+            "total_batches": progress.total_batches,
             "failed_batches": failed_batches,
         }
 
-        publish_completion(parent_job_id, "SUCCESS", result=final_result)
-        _update_job_status(parent_job_id, "SUCCESS", result=final_result)
-
-        self.update_progress(
-            progress.total_items,
-            progress.total_items,
-            f"Complete: {len(merged_bursts)} bursts detected",
-            {"phase": "complete"},
+        # Publish final progress
+        publish_job_progress(
+            parent_job_id,
+            progress,
+            f"Burst detection complete: {len(merged_bursts)} bursts detected",
+            phase="completed",
         )
 
         logger.info(
-            f"[{finalizer_id}] Burst detection complete: {len(merged_bursts)} bursts, {total_burst_images} images"
+            f"[{parent_job_id}] Burst detection complete: {len(merged_bursts)} bursts, {total_burst_images} images"
         )
 
         return final_result
 
     except Exception as e:
-        logger.error(f"[{finalizer_id}] Finalizer failed: {e}", exc_info=True)
-        publish_completion(parent_job_id, "FAILURE", error=str(e))
-        _update_job_status(parent_job_id, "FAILURE", error=str(e))
+        logger.error(f"[{parent_job_id}] Finalizer failed: {e}", exc_info=True)
         raise
 
 
