@@ -24,14 +24,14 @@ All services run in one Docker container for maximum simplicity:
 ├─────────────────────────────────────────────────────────┤
 │                                                         │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │  PostgreSQL  │  │    Redis     │  │   Celery     │ │
-│  │   Database   │  │    Broker    │  │   Workers    │ │
+│  │  PostgreSQL  │  │   FastAPI    │  │  Threading   │ │
+│  │   Database   │  │   Web API    │  │  Job System  │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘ │
 │                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │   FastAPI    │  │   Vue.js     │  │     GPU      │ │
-│  │   Web API    │  │   Frontend   │  │  (optional)  │ │
-│  └──────────────┘  └──────────────┘  └──────────────┘ │
+│  ┌──────────────┐  ┌──────────────┐                   │
+│  │   Vue.js     │  │     GPU      │                   │
+│  │   Frontend   │  │  (optional)  │                   │
+│  └──────────────┘  └──────────────┘                   │
 │                                                         │
 └─────────────────────────────────────────────────────────┘
            │                    │
@@ -44,22 +44,17 @@ All services run in one Docker container for maximum simplicity:
 
 **PostgreSQL**
 - Catalog metadata (images, duplicates, dates, quality scores)
-- Celery task results (for chord operations)
+- Job coordination and progress tracking
 - ACID transactions for data integrity
 - Efficient indexing for large datasets
 
-**Redis**
-- Celery message broker
-- Task queue management
-- Real-time job progress tracking
-- Fast in-memory operations
-
-**Celery**
-- Background job processing
-- Parallel task execution
+**Threading Job System**
+- Background job processing via ThreadPoolExecutor
+- Parallel task execution across CPU cores
 - Duplicate detection coordination
 - Thumbnail generation
 - Catalog organization
+- PostgreSQL-based job tracking and cancellation
 
 **FastAPI**
 - REST API for catalog operations
@@ -89,8 +84,7 @@ All services run in one Docker container for maximum simplicity:
 |-----------|-----------|---------|
 | Language | Python 3.11+ | Application logic |
 | Database | PostgreSQL 14+ | Catalog storage |
-| Broker | Redis 7+ | Task queue |
-| Task Queue | Celery 5+ | Background jobs |
+| Job System | ThreadPoolExecutor | Background jobs |
 | Web API | FastAPI | REST endpoints |
 | Frontend | Vue.js 3 | User interface |
 | GPU | PyTorch + CUDA 12.4 | Acceleration |
@@ -136,10 +130,11 @@ lumina/
 │   ├── schema.sql     # Database schema
 │   └── config.py      # Database configuration
 │
-├── jobs/              # Celery background tasks
-│   ├── tasks.py       # Job definitions
+├── jobs/              # Background job system
+│   ├── background_jobs.py       # ThreadPoolExecutor coordination
+│   ├── coordinator.py           # Job coordination with BatchManager
 │   ├── parallel_duplicates.py  # Duplicate detection
-│   └── progress_publisher.py   # Job progress tracking
+│   └── progress_publisher.py   # PostgreSQL-based progress tracking
 │
 ├── api/               # FastAPI routes
 │   └── routers/
@@ -256,9 +251,9 @@ Trigger: User request or post-analysis
     │
     ↓
 ┌─────────────────────────────────────┐
-│   Celery Job Submission             │
-│   - Create job record               │
-│   - Queue background task           │
+│   Background Job Submission         │
+│   - Create job record in DB         │
+│   - Submit to ThreadPoolExecutor    │
 └────────┬────────────────────────────┘
          │
          ↓
@@ -395,7 +390,7 @@ User specifies output directory
 - Images processed per second
 - GPU utilization percentage
 - Database query performance
-- Celery queue depth
+- Thread pool utilization
 - Memory usage trends
 
 **Dashboard**:
@@ -443,8 +438,8 @@ User specifies output directory
 
 **Docker Deployment**:
 - Internal PostgreSQL (no external access)
-- Internal Redis (no external access)
 - Configurable web port binding
+- Single container for all services
 
 ---
 
@@ -460,20 +455,20 @@ User specifies output directory
 ### Performance Tuning
 
 **Small Libraries** (<10k images):
-- 4-8 CPU workers
-- 2-4 Celery workers
+- 4-8 thread pool workers
 - GPU optional
+- HDD acceptable
 
 **Medium Libraries** (10k-100k):
-- 16-32 CPU workers
-- 4-8 Celery workers
+- 8-16 thread pool workers
 - GPU recommended
+- SSD recommended
 
 **Large Libraries** (100k+):
-- 32-64 CPU workers
-- 8-16 Celery workers
+- 16-32 thread pool workers
 - GPU strongly recommended
 - SSD for catalog database
+- Consider batch size tuning
 
 ---
 
@@ -495,7 +490,7 @@ User specifies output directory
 **Scalability**:
 - Lazy loading for massive catalogs
 - Distributed hash tables
-- Caching layers (Redis)
+- In-memory caching (LRU preview cache)
 - Read replicas for PostgreSQL
 
 ---

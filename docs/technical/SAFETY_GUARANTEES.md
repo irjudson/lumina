@@ -343,7 +343,7 @@ grep "completed" catalog/.transactions/{transaction_id}.json
 
 **Protection**:
 - ✅ File locking prevents concurrent writes
-- ✅ Jobs queued by Celery (sequential by default)
+- ✅ Jobs coordinated via PostgreSQL (BatchManager)
 - ✅ Second job waits for lock (30s timeout)
 
 ### 5. Accidentally Deleting Catalog

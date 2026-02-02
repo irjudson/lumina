@@ -108,28 +108,19 @@ POSTGRES_PORT=5432
 POSTGRES_DB=lumina
 POSTGRES_USER=lumina
 POSTGRES_PASSWORD=your-password
-
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=db+postgresql://lumina:your-password@localhost:5432/lumina
 ```
 
 ### Run Services
 
-You'll need 3 terminals:
+You only need 2 terminals (background jobs run in the web server process):
 
-**Terminal 1 - Celery Worker**:
-```bash
-source venv/bin/activate
-celery -A lumina.celery_app worker --loglevel=info
-```
-
-**Terminal 2 - Web Server**:
+**Terminal 1 - Web Server**:
 ```bash
 source venv/bin/activate
 lumina-web /path/to/catalog
 ```
 
-**Terminal 3 - CLI Commands**:
+**Terminal 2 - CLI Commands**:
 ```bash
 source venv/bin/activate
 lumina-analyze /path/to/catalog -s /path/to/photos
@@ -163,7 +154,7 @@ tests/
 ├── cli/           # Command-line interface
 ├── web/           # Web API and endpoints
 ├── shared/        # Shared utilities
-├── jobs/          # Celery background jobs
+├── jobs/          # Background job system (threading)
 └── conftest.py    # Pytest configuration
 ```
 
