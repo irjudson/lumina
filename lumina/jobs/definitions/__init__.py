@@ -1,9 +1,8 @@
 """Job definitions - import all to register with global registry."""
 
-from . import scan
+from . import duplicates, scan
 
-# These will be added in subsequent tasks
-# from . import duplicates
+# Bursts will be added in subsequent task
 # from . import bursts
 
-__all__ = ["scan"]
+__all__ = ["duplicates", "scan"]
