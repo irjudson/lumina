@@ -13,8 +13,12 @@ a single, configurable job definition system.
 
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
+
+logger = logging.getLogger(__name__)
 
 # Type variable for work items (e.g., image paths, image IDs, etc.)
 T = TypeVar("T")
@@ -132,3 +136,161 @@ def register_job(job: ParallelJob) -> ParallelJob:
     """
     REGISTRY.register(job)
     return job
+
+
+class JobExecutor(Generic[T]):
+    """
+    Executor for parallel jobs.
+
+    JobExecutor manages the execution lifecycle of a ParallelJob:
+    1. Discovery - find work items for a catalog
+    2. Batching - split items into batches
+    3. Processing - execute batches in parallel
+    4. Finalization - aggregate results
+
+    Type Parameters:
+        T: The type of work items handled by the job
+    """
+
+    def __init__(self, job: ParallelJob[T]) -> None:
+        """
+        Initialize a job executor.
+
+        Args:
+            job: The ParallelJob definition to execute
+        """
+        self.job = job
+
+    def run(self, job_id: str, catalog_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """
+        Execute the job for a catalog.
+
+        Runs the full job lifecycle: discover -> process -> finalize.
+
+        Args:
+            job_id: Unique identifier for this job execution
+            catalog_id: The catalog to process
+            **kwargs: Additional arguments passed to process function
+
+        Returns:
+            Dict containing:
+                - success_count: Number of successfully processed items
+                - error_count: Number of failed items
+                - total_items: Total items discovered
+                - errors: List of error details
+                - Plus any keys returned by finalize()
+        """
+        logger.info(
+            f"Starting job {self.job.name} (id={job_id}) for catalog {catalog_id}"
+        )
+
+        # Phase 1: Discovery
+        items = self.job.discover(catalog_id)
+        total_items = len(items)
+        logger.info(f"Discovered {total_items} items for job {job_id}")
+
+        if not items:
+            return self._empty_result()
+
+        # Phase 2: Create batches
+        batches = self._create_batches(items)
+        logger.info(f"Created {len(batches)} batches for job {job_id}")
+
+        # Phase 3: Process in parallel
+        all_results: List[Dict[str, Any]] = []
+        all_errors: List[Dict[str, Any]] = []
+        success_count = 0
+        error_count = 0
+
+        with ThreadPoolExecutor(max_workers=self.job.max_workers) as executor:
+            futures = {
+                executor.submit(self._process_batch, batch, catalog_id, kwargs): i
+                for i, batch in enumerate(batches)
+            }
+
+            for future in as_completed(futures):
+                batch_result = future.result()
+                all_results.extend(batch_result["results"])
+                all_errors.extend(batch_result["errors"])
+                success_count += batch_result["success_count"]
+                error_count += batch_result["error_count"]
+
+        # Phase 4: Finalize
+        result = {
+            "success_count": success_count,
+            "error_count": error_count,
+            "total_items": total_items,
+            "errors": all_errors,
+        }
+
+        if self.job.finalize is not None:
+            finalize_result = self.job.finalize(all_results, catalog_id)
+            result.update(finalize_result)
+
+        logger.info(
+            f"Job {job_id} completed: {success_count} succeeded, {error_count} failed"
+        )
+        return result
+
+    def _create_batches(self, items: List[T]) -> List[List[T]]:
+        """
+        Split items into batches.
+
+        Args:
+            items: List of work items
+
+        Returns:
+            List of batches, each containing up to batch_size items
+        """
+        batch_size = self.job.batch_size
+        return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+    def _process_batch(
+        self, batch: List[T], catalog_id: str, kwargs: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Process a single batch of items.
+
+        Args:
+            batch: List of items to process
+            catalog_id: The catalog being processed
+            kwargs: Additional arguments for process function
+
+        Returns:
+            Dict with results, errors, success_count, error_count
+        """
+        results: List[Dict[str, Any]] = []
+        errors: List[Dict[str, Any]] = []
+        success_count = 0
+        error_count = 0
+
+        for item in batch:
+            try:
+                result = self.job.process(item, catalog_id=catalog_id, **kwargs)
+                results.append(result)
+                success_count += 1
+            except Exception as e:
+                logger.warning(f"Error processing item {item}: {e}")
+                errors.append({"item": item, "error": str(e)})
+                error_count += 1
+
+        return {
+            "results": results,
+            "errors": errors,
+            "success_count": success_count,
+            "error_count": error_count,
+        }
+
+    def _empty_result(self) -> Dict[str, Any]:
+        """
+        Return an empty result dict.
+
+        Returns:
+            Dict with zero counts and empty lists
+        """
+        return {
+            "success_count": 0,
+            "error_count": 0,
+            "total_items": 0,
+            "errors": [],
+        }
