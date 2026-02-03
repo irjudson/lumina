@@ -1,16 +1,19 @@
 """Tests for base repository pattern."""
 
+import uuid
 from typing import Optional
 
 import pytest
-from sqlmodel import Field, Session, SQLModel, create_engine
+from sqlalchemy import text
+from sqlmodel import Field, Session, SQLModel
 
 
-# Test model for repository tests
+# Model for repository tests - registered with SQLModel's metadata
+# The table is created by conftest.py's SQLModel.metadata.create_all()
 class MockEntity(SQLModel, table=True):
-    """Test entity for repository testing."""
+    """Mock entity for repository testing."""
 
-    __tablename__ = "test_entities"
+    __tablename__ = "test_base_mock_entities"
 
     id: str = Field(primary_key=True)
     name: str = Field(max_length=100)
@@ -18,18 +21,14 @@ class MockEntity(SQLModel, table=True):
 
 
 @pytest.fixture
-def engine():  # type: ignore[no-untyped-def]
-    """Create in-memory SQLite database."""
-    db_engine = create_engine("sqlite:///:memory:")
-    SQLModel.metadata.create_all(db_engine)
-    return db_engine
-
-
-@pytest.fixture
-def session(engine):  # type: ignore[no-untyped-def]
-    """Create database session."""
-    with Session(engine) as db_session:
+def session(db_engine):  # type: ignore[no-untyped-def]
+    """Create database session with cleanup."""
+    with Session(db_engine) as db_session:
+        # Clean up any existing test data before each test
+        db_session.exec(text("DELETE FROM test_base_mock_entities"))  # type: ignore[call-overload]
+        db_session.commit()
         yield db_session
+        db_session.rollback()
 
 
 def test_repository_add(session: Session) -> None:
@@ -37,12 +36,11 @@ def test_repository_add(session: Session) -> None:
     from lumina.db.repositories.base import BaseRepository
 
     repo = BaseRepository(session, MockEntity)
-    entity = MockEntity(id="1", name="Test")
+    entity = MockEntity(id=f"add-{uuid.uuid4().hex[:8]}", name="Test")
 
     result = repo.add(entity)
     repo.commit()
 
-    assert result.id == "1"
     assert result.name == "Test"
 
 
@@ -51,14 +49,15 @@ def test_repository_get(session: Session) -> None:
     from lumina.db.repositories.base import BaseRepository
 
     repo = BaseRepository(session, MockEntity)
-    entity = MockEntity(id="1", name="Test")
+    test_id = f"get-{uuid.uuid4().hex[:8]}"
+    entity = MockEntity(id=test_id, name="Test")
     repo.add(entity)
     repo.commit()
 
-    result = repo.get("1")
+    result = repo.get(test_id)
 
     assert result is not None
-    assert result.id == "1"
+    assert result.id == test_id
     assert result.name == "Test"
 
 
@@ -79,7 +78,7 @@ def test_repository_list(session: Session) -> None:
 
     repo = BaseRepository(session, MockEntity)
     for i in range(5):
-        repo.add(MockEntity(id=str(i), name=f"Test {i}"))
+        repo.add(MockEntity(id=f"list-{uuid.uuid4().hex[:8]}-{i}", name=f"Test {i}"))
     repo.commit()
 
     # Get first page
@@ -100,7 +99,8 @@ def test_repository_update(session: Session) -> None:
     from lumina.db.repositories.base import BaseRepository
 
     repo = BaseRepository(session, MockEntity)
-    entity = MockEntity(id="1", name="Original")
+    test_id = f"update-{uuid.uuid4().hex[:8]}"
+    entity = MockEntity(id=test_id, name="Original")
     repo.add(entity)
     repo.commit()
 
@@ -109,7 +109,7 @@ def test_repository_update(session: Session) -> None:
     repo.update(entity)
     repo.commit()
 
-    result = repo.get("1")
+    result = repo.get(test_id)
     assert result is not None
     assert result.name == "Updated"
 
@@ -119,14 +119,15 @@ def test_repository_delete(session: Session) -> None:
     from lumina.db.repositories.base import BaseRepository
 
     repo = BaseRepository(session, MockEntity)
-    entity = MockEntity(id="1", name="Test")
+    test_id = f"delete-{uuid.uuid4().hex[:8]}"
+    entity = MockEntity(id=test_id, name="Test")
     repo.add(entity)
     repo.commit()
 
     repo.delete(entity)
     repo.commit()
 
-    result = repo.get("1")
+    result = repo.get(test_id)
     assert result is None
 
 
@@ -135,11 +136,12 @@ def test_repository_rollback(session: Session) -> None:
     from lumina.db.repositories.base import BaseRepository
 
     repo = BaseRepository(session, MockEntity)
-    entity = MockEntity(id="1", name="Test")
+    test_id = f"rollback-{uuid.uuid4().hex[:8]}"
+    entity = MockEntity(id=test_id, name="Test")
     repo.add(entity)
 
     # Rollback before commit
     repo.rollback()
 
-    result = repo.get("1")
+    result = repo.get(test_id)
     assert result is None
