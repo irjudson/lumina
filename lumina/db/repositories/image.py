@@ -3,9 +3,10 @@
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlmodel import Session, select
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-from lumina.models.image import Image
+from lumina.db.models import Image
 
 from .base import BaseRepository
 
@@ -17,9 +18,9 @@ class ImageRepository(BaseRepository[Image]):
         """Initialize image repository.
 
         Args:
-            session: SQLModel database session
+            session: Database session (SQLAlchemy or SQLModel compatible)
         """
-        super().__init__(session, Image)
+        super().__init__(session, Image)  # type: ignore[arg-type]
 
     def get_by_catalog(
         self,
@@ -34,16 +35,16 @@ class ImageRepository(BaseRepository[Image]):
             catalog_id: Catalog UUID
             limit: Maximum number of images
             offset: Number of images to skip
-            status: Optional processing status filter
+            status: Optional status filter (matches status_id)
 
         Returns:
             List of images
         """
         stmt = select(Image).where(Image.catalog_id == catalog_id)
         if status:
-            stmt = stmt.where(Image.status == status)
+            stmt = stmt.where(Image.status_id == status)
         stmt = stmt.offset(offset).limit(limit)
-        return list(self.session.exec(stmt).all())
+        return list(self.session.execute(stmt).scalars().all())
 
     def get_without_hashes(self, catalog_id: uuid.UUID) -> List[str]:
         """Get image IDs that need hash computation.
@@ -59,7 +60,7 @@ class ImageRepository(BaseRepository[Image]):
             .where(Image.catalog_id == catalog_id)
             .where(Image.dhash.is_(None))
         )
-        return list(self.session.exec(stmt).all())
+        return list(self.session.execute(stmt).scalars().all())
 
     def get_with_hashes(self, catalog_id: uuid.UUID) -> List[Dict[str, Any]]:
         """Get images with their hashes for duplicate detection.
@@ -75,7 +76,7 @@ class ImageRepository(BaseRepository[Image]):
             .where(Image.catalog_id == catalog_id)
             .where(Image.dhash.isnot(None))
         )
-        images = self.session.exec(stmt).all()
+        images = self.session.execute(stmt).scalars().all()
         return [
             {
                 "id": img.id,
@@ -99,7 +100,7 @@ class ImageRepository(BaseRepository[Image]):
             List of dicts with id, timestamp, camera, quality_score
         """
         stmt = select(Image).where(Image.catalog_id == catalog_id)
-        images = self.session.exec(stmt).all()
+        images = self.session.execute(stmt).scalars().all()
 
         results = []
         for img in images:

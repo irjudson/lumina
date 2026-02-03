@@ -1,23 +1,27 @@
 """Base repository pattern for data access."""
 
-from typing import Generic, List, Optional, Type, TypeVar
+from typing import Any, Generic, List, Optional, Type, TypeVar
 
-from sqlmodel import Session, SQLModel, select
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
-T = TypeVar("T", bound=SQLModel)
+T = TypeVar("T")
 
 
 class BaseRepository(Generic[T]):
-    """Generic repository with CRUD operations."""
+    """Generic repository with CRUD operations.
+
+    Works with both SQLAlchemy and SQLModel models.
+    """
 
     def __init__(self, session: Session, model: Type[T]):
         """Initialize repository with session and model type.
 
         Args:
-            session: SQLModel database session
+            session: Database session (SQLAlchemy or SQLModel compatible)
             model: The model class this repository operates on
         """
-        self.session = session
+        self.session: Any = session  # Any to support both SQLModel and SQLAlchemy
         self.model = model
 
     def get(self, id: str) -> Optional[T]:
@@ -42,7 +46,8 @@ class BaseRepository(Generic[T]):
             List of entities
         """
         stmt = select(self.model).offset(offset).limit(limit)
-        return list(self.session.exec(stmt).all())
+        result = self.session.execute(stmt)
+        return list(result.scalars().all())
 
     def add(self, entity: T) -> T:
         """Add new entity.

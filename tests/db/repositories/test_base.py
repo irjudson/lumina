@@ -20,10 +20,18 @@ class MockEntity(SQLModel, table=True):
     value: Optional[int] = Field(default=None)
 
 
+@pytest.fixture(scope="module")
+def mock_table_created(engine):  # type: ignore[no-untyped-def]
+    """Create the mock entity table for testing."""
+    SQLModel.metadata.create_all(engine, tables=[MockEntity.__table__])  # type: ignore[attr-defined]
+    yield
+    SQLModel.metadata.drop_all(engine, tables=[MockEntity.__table__])  # type: ignore[attr-defined]
+
+
 @pytest.fixture
-def session(db_engine):  # type: ignore[no-untyped-def]
+def session(engine, mock_table_created):  # type: ignore[no-untyped-def]
     """Create database session with cleanup."""
-    with Session(db_engine) as db_session:
+    with Session(engine) as db_session:
         # Clean up any existing test data before each test
         db_session.exec(text("DELETE FROM test_base_mock_entities"))  # type: ignore[call-overload]
         db_session.commit()

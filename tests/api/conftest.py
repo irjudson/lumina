@@ -1,7 +1,26 @@
 """Pytest configuration for API tests."""
 
+import uuid
+
 import pytest
 from fastapi.testclient import TestClient
+
+from lumina.db.models import Catalog
+
+
+@pytest.fixture
+def test_catalog_id(db_session) -> uuid.UUID:
+    """Create a test catalog and return its ID for FK constraint satisfaction."""
+    catalog = Catalog(
+        id=uuid.uuid4(),
+        name="API Test Catalog",
+        schema_name=f"test_api_{uuid.uuid4().hex[:8]}",
+        source_directories=["/test/api/path"],
+    )
+    db_session.add(catalog)
+    db_session.commit()
+    db_session.refresh(catalog)
+    return catalog.id
 
 
 @pytest.fixture

@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..db import init_db
-from .routers import catalogs
+from .routers import catalogs, images
 from .routers import jobs_new as jobs
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+    app.include_router(images.router, prefix="/api", tags=["images"])
 
     # Health check endpoint
     @app.get("/health")
