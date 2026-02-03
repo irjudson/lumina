@@ -1,0 +1,145 @@
+"""Tests for base repository pattern."""
+
+from typing import Optional
+
+import pytest
+from sqlmodel import Field, Session, SQLModel, create_engine
+
+
+# Test model for repository tests
+class MockEntity(SQLModel, table=True):
+    """Test entity for repository testing."""
+
+    __tablename__ = "test_entities"
+
+    id: str = Field(primary_key=True)
+    name: str = Field(max_length=100)
+    value: Optional[int] = Field(default=None)
+
+
+@pytest.fixture
+def engine():  # type: ignore[no-untyped-def]
+    """Create in-memory SQLite database."""
+    db_engine = create_engine("sqlite:///:memory:")
+    SQLModel.metadata.create_all(db_engine)
+    return db_engine
+
+
+@pytest.fixture
+def session(engine):  # type: ignore[no-untyped-def]
+    """Create database session."""
+    with Session(engine) as db_session:
+        yield db_session
+
+
+def test_repository_add(session: Session) -> None:
+    """Should add entity to database."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    entity = MockEntity(id="1", name="Test")
+
+    result = repo.add(entity)
+    repo.commit()
+
+    assert result.id == "1"
+    assert result.name == "Test"
+
+
+def test_repository_get(session: Session) -> None:
+    """Should retrieve entity by ID."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    entity = MockEntity(id="1", name="Test")
+    repo.add(entity)
+    repo.commit()
+
+    result = repo.get("1")
+
+    assert result is not None
+    assert result.id == "1"
+    assert result.name == "Test"
+
+
+def test_repository_get_not_found(session: Session) -> None:
+    """Should return None for non-existent ID."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+
+    result = repo.get("nonexistent")
+
+    assert result is None
+
+
+def test_repository_list(session: Session) -> None:
+    """Should list entities with pagination."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    for i in range(5):
+        repo.add(MockEntity(id=str(i), name=f"Test {i}"))
+    repo.commit()
+
+    # Get first page
+    result = repo.list(limit=2, offset=0)
+    assert len(result) == 2
+
+    # Get second page
+    result = repo.list(limit=2, offset=2)
+    assert len(result) == 2
+
+    # Get last page
+    result = repo.list(limit=2, offset=4)
+    assert len(result) == 1
+
+
+def test_repository_update(session: Session) -> None:
+    """Should update existing entity."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    entity = MockEntity(id="1", name="Original")
+    repo.add(entity)
+    repo.commit()
+
+    # Update
+    entity.name = "Updated"
+    repo.update(entity)
+    repo.commit()
+
+    result = repo.get("1")
+    assert result is not None
+    assert result.name == "Updated"
+
+
+def test_repository_delete(session: Session) -> None:
+    """Should delete entity."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    entity = MockEntity(id="1", name="Test")
+    repo.add(entity)
+    repo.commit()
+
+    repo.delete(entity)
+    repo.commit()
+
+    result = repo.get("1")
+    assert result is None
+
+
+def test_repository_rollback(session: Session) -> None:
+    """Should rollback uncommitted changes."""
+    from lumina.db.repositories.base import BaseRepository
+
+    repo = BaseRepository(session, MockEntity)
+    entity = MockEntity(id="1", name="Test")
+    repo.add(entity)
+
+    # Rollback before commit
+    repo.rollback()
+
+    result = repo.get("1")
+    assert result is None
