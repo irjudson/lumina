@@ -294,3 +294,50 @@ class JobExecutor(Generic[T]):
             "total_items": 0,
             "errors": [],
         }
+
+
+class JobExecutorWithDB(JobExecutor[T]):
+    """
+    JobExecutor with database-backed batch tracking.
+
+    Extends JobExecutor to:
+    - Create JobBatch records for restartability
+    - Track progress in database
+    - Support cancellation
+    - Publish progress events
+    """
+
+    def __init__(self, job: ParallelJob[T], db_session_factory: Callable) -> None:
+        """
+        Initialize a job executor with database support.
+
+        Args:
+            job: The ParallelJob definition to execute
+            db_session_factory: Factory function that returns database sessions
+        """
+        super().__init__(job)
+        self.db_session_factory = db_session_factory
+
+    def run(
+        self,
+        job_id: str,
+        catalog_id: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """
+        Execute with database tracking.
+
+        For now, delegates to parent implementation.
+        Full implementation will use BatchManager pattern.
+
+        Args:
+            job_id: Unique identifier for this job execution
+            catalog_id: The catalog to process
+            **kwargs: Additional arguments passed to process function
+
+        Returns:
+            Dict containing execution results (see parent class)
+        """
+        # For now, delegate to parent
+        # Full implementation will use BatchManager pattern
+        return super().run(job_id, catalog_id, **kwargs)
