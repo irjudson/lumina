@@ -2,6 +2,7 @@
 
 from .base import BaseModel, TimestampMixin
 from .catalog import Catalog, CatalogCreate, CatalogRead
+from .image import FileType, Image, ImageRead, ProcessingStatus
 
 __all__ = [
     "BaseModel",
@@ -9,4 +10,8 @@ __all__ = [
     "Catalog",
     "CatalogCreate",
     "CatalogRead",
+    "FileType",
+    "Image",
+    "ImageRead",
+    "ProcessingStatus",
 ]
