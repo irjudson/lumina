@@ -61,11 +61,44 @@ def scan_analyze_job(
 
 
 def detect_duplicates_job(
-    catalog_id: str, job_id: str, similarity_threshold: int = 5, **kwargs: Any
+    catalog_id: str,
+    job_id: str,
+    similarity_threshold: int = 5,
+    recompute_hashes: bool = False,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
-    """Run duplicate detection."""
+    """Run duplicate detection using perceptual hashing.
+
+    Args:
+        catalog_id: The catalog UUID
+        job_id: The background job ID
+        similarity_threshold: Maximum Hamming distance for similar images (default: 5)
+        recompute_hashes: Force recomputation of perceptual hashes
+        **kwargs: Additional options
+
+    Returns:
+        Dict with duplicate detection results
+    """
+    from ..analysis.duplicate_detector import DuplicateDetector
+
     try:
-        with CatalogDatabase(catalog_id) as _catalog_db:  # noqa: F841
+        with CatalogDatabase(catalog_id) as catalog_db:
+
+            def progress_callback(current: int, total: int, message: str) -> None:
+                """Update job progress."""
+                percent = int((current / total) * 100) if total > 0 else 0
+                update_job_status(
+                    job_id,
+                    "PROGRESS",
+                    progress={
+                        "current": current,
+                        "total": total,
+                        "percent": percent,
+                        "phase": "detecting_duplicates",
+                        "message": message,
+                    },
+                )
+
             update_job_status(
                 job_id,
                 "PROGRESS",
@@ -73,16 +106,33 @@ def detect_duplicates_job(
                     "current": 0,
                     "total": 100,
                     "percent": 0,
-                    "phase": "detecting_duplicates",
+                    "phase": "initializing",
                 },
             )
 
-            # TODO: Implement duplicate detection
-            # For now, just a stub
+            # Create detector with progress callback
+            detector = DuplicateDetector(
+                catalog=catalog_db,
+                similarity_threshold=similarity_threshold,
+                num_workers=1,  # Use single-threaded mode for job worker
+                progress_callback=progress_callback,
+            )
+
+            # Run detection (results stored in detector.duplicate_groups)
+            detector.detect_duplicates(recompute_hashes=recompute_hashes)
+
+            # Save results to database
+            detector.save_duplicate_groups()
+            detector.save_problematic_files()
+
+            # Get statistics
+            stats = detector.get_statistics()
 
             result = {
-                "duplicates_found": 0,
-                "groups_created": 0,
+                "duplicates_found": stats["total_images_in_groups"],
+                "groups_created": stats["total_groups"],
+                "redundant_images": stats["total_redundant"],
+                "groups_needing_review": stats["groups_needing_review"],
                 "catalog_id": catalog_id,
             }
 

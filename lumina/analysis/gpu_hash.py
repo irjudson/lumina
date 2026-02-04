@@ -342,17 +342,25 @@ class GPUHashProcessor:
         """
         Compute wHash for a batch of images on GPU.
 
-        Note: This uses DCT approximation instead of full DWT for GPU compatibility.
+        **GPU Limitation:** True wavelet hash (wHash) uses Discrete Wavelet Transform
+        (DWT) with Haar wavelets via pywt, which is CPU-only. This GPU implementation
+        uses 2D FFT as an approximation that captures similar frequency characteristics
+        but produces different hash values than the CPU wHash.
+
+        The FFT-based approach:
+        - Extracts low-frequency components (analogous to DWT approximation coefficients)
+        - Compares against median threshold (same as CPU wHash)
+        - Produces 64-bit hashes compatible with Hamming distance comparison
+
+        For exact wHash compatibility with CPU results, use the CPU implementation
+        in lumina.analysis.hashing.compute_whash().
 
         Args:
             images: Batch of preprocessed images (batch, 1, 8, 8)
 
         Returns:
-            List of whash strings
+            List of whash strings (FFT-approximated, not true DWT-based)
         """
-        # For now, use simple frequency-based hash
-        # TODO: Implement proper DWT on GPU using cupy or custom CUDA kernel
-
         # Use 2D FFT as approximation
         fft = self.torch.fft.fft2(images.squeeze(1))
         fft_abs = self.torch.abs(fft)

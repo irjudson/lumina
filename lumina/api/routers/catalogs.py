@@ -2499,7 +2499,7 @@ def list_bursts(
     ),
     sort: str = Query(
         "newest",
-        regex="^(newest|oldest|largest)$",
+        pattern="^(newest|oldest|largest)$",
         description="Sort order: newest, oldest, or largest",
     ),
     db: Session = Depends(get_db),

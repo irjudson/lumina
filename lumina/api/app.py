@@ -59,17 +59,6 @@ def create_app() -> FastAPI:
     async def health_check() -> dict[str, str]:
         return {"status": "healthy"}
 
-    # Worker health monitoring endpoint - DISABLED (Celery removed)
-    # @app.get("/api/workers/status")
-    # async def worker_status() -> dict[str, Any]:
-    #     """Get status of all Celery workers."""
-    #     # TODO: Implement with FastAPI BackgroundTasks if needed
-    #     return {
-    #         "total_workers": 0,
-    #         "healthy_workers": 0,
-    #         "workers": [],
-    #     }
-
     # Serve static files and root endpoint
     static_dir = Path(__file__).parent.parent / "web" / "static"
     if static_dir.exists():

@@ -1,5 +1,8 @@
 services:
   lumina:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: lumina:latest
     container_name: lumina
     ports:

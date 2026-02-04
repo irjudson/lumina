@@ -27,9 +27,7 @@ except ImportError:
 
 from sqlalchemy import text
 
-from lumina.core.types import FileType, ImageRecord, ImageStatus
-
-from ..analysis.burst_detector import BurstDetector, BurstGroup, ImageInfo
+from ..analysis.burst_detector import BurstDetector, ImageInfo
 from ..analysis.scanner import _process_file_worker
 from ..db import CatalogDB as CatalogDatabase
 from ..organization import FileOrganizer, OrganizationStrategy
@@ -1807,7 +1805,6 @@ def chord_progress_monitor_task(
             # Mode 2: Monitor celery_taskmeta for worker completion
             # Used by jobs that don't use job_batches (e.g., duplicate comparison)
             from ..db import get_db_context
-            from .coordinator import publish_job_progress as publish_progress_func
 
             with get_db_context() as session:
                 # Count workers that completed after the comparison phase started
