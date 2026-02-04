@@ -8,7 +8,7 @@ import os
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union, cast
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps
 from pydantic import BaseModel
 
-from ..analysis.semantic_search import SearchResult, SemanticSearchService
+from ..analysis.semantic_search import SemanticSearchService
 from ..api.routers import jobs_new as jobs
 from ..api.routers.catalogs import load_image_any_format
 from ..core.types import ImageRecord
@@ -2226,8 +2226,6 @@ async def get_image_histogram(catalog_id: str, image_id: str) -> HistogramRespon
     try:
         # Get image record
         from sqlalchemy import text
-
-        from ..db.models import Image as ImageModel
 
         result = db.session.execute(
             text(

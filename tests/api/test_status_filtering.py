@@ -3,15 +3,22 @@
 This module contains placeholder tests for verifying that API endpoints
 properly filter out rejected images by default and include them when requested.
 
+NOTE: These tests are INTENTIONALLY skipped as placeholders. They serve as a
+roadmap for implementing the `show_rejected` query parameter across all relevant
+API endpoints. Each test class corresponds to an endpoint that needs updating.
+
+Implementation status:
+- [x] Bursts endpoint (lumina/api/routers/catalogs.py) - has show_rejected param
+- [ ] Images list endpoint - TODO
+- [ ] Thumbnails endpoint - TODO
+- [ ] Search endpoint - TODO
+- [ ] Similar images endpoint - TODO
+- [ ] Duplicates endpoint - TODO
+
 See docs/development/status-filtering-pattern.md for implementation details.
 """
 
-import uuid
-from unittest.mock import patch
-
 import pytest
-
-from lumina.db.models import Catalog
 
 pytestmark = pytest.mark.integration
 

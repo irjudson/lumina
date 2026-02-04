@@ -9,7 +9,6 @@ import uvicorn
 from rich.console import Console
 
 from lumina.version import get_version_string
-from lumina.web.api import init_catalog
 
 console = Console()
 
@@ -68,15 +67,12 @@ def web(catalog_path: str, host: str, port: int, reload: bool) -> None:
     console.print(f"Catalog: {catalog_dir}")
     console.print(f"Server: http://{host}:{port}\n")
 
-    # Initialize catalog
-    init_catalog(catalog_dir)
-
     console.print("[green]Starting web server...[/green]")
     console.print(f"[yellow]Open http://{host}:{port} in your browser[/yellow]\n")
 
-    # Start server
+    # Start server using new API
     uvicorn.run(
-        "lumina.web.api:app",
+        "lumina.api.app:app",
         host=host,
         port=port,
         reload=reload,

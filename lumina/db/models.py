@@ -2,12 +2,11 @@
 
 import uuid as uuid_module
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     ARRAY,
-    JSON,
     BigInteger,
     Boolean,
     Column,

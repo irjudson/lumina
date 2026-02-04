@@ -9,7 +9,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from ..db import init_db
-from .routers import catalogs
+from .routers import catalogs, images
 from .routers import jobs_new as jobs
 
 logger = logging.getLogger(__name__)
@@ -52,22 +52,12 @@ def create_app() -> FastAPI:
     # Include routers
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
+    app.include_router(images.router, prefix="/api", tags=["images"])
 
     # Health check endpoint
     @app.get("/health")
     async def health_check() -> dict[str, str]:
         return {"status": "healthy"}
-
-    # Worker health monitoring endpoint - DISABLED (Celery removed)
-    # @app.get("/api/workers/status")
-    # async def worker_status() -> dict[str, Any]:
-    #     """Get status of all Celery workers."""
-    #     # TODO: Implement with FastAPI BackgroundTasks if needed
-    #     return {
-    #         "total_workers": 0,
-    #         "healthy_workers": 0,
-    #         "workers": [],
-    #     }
 
     # Serve static files and root endpoint
     static_dir = Path(__file__).parent.parent / "web" / "static"
