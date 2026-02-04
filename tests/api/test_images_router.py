@@ -7,6 +7,9 @@ from fastapi.testclient import TestClient
 
 from lumina.db.models import Image
 
+# Mark all tests in this module as integration tests (require database)
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def test_images(db_session, test_catalog_id: uuid.UUID) -> list[Image]:

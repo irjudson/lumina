@@ -7,6 +7,9 @@ import pytest
 from sqlalchemy import text
 from sqlmodel import Field, Session, SQLModel
 
+# Mark all tests in this module as integration tests (require database)
+pytestmark = pytest.mark.integration
+
 
 # Model for repository tests - registered with SQLModel's metadata
 # The table is created by conftest.py's SQLModel.metadata.create_all()
