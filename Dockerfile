@@ -82,11 +82,22 @@ RUN pip install --no-cache-dir \
     ftfy>=6.1.0 \
     ollama>=0.3.0
 
+# Stage 1: Build Frontend
+FROM node:20-alpine as frontend-build
+WORKDIR /app/web/client
+COPY lumina/web/client/package*.json ./
+RUN npm ci
+COPY lumina/web/client/ .
+RUN npm run build  # Outputs to /app/web/static
+
+
 # Copy application code and set PATH
 COPY lumina/ ./lumina/
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/bin:/app
 # Copy application code
 COPY lumina/ ./lumina/
+# Copy built frontend assets from the build stage
+COPY --from=frontend-build /app/web/static /app/lumina/web/static
 
 # Create directories for catalogs and photos (PostgreSQL data dir will be created by initdb)
 RUN mkdir -p /app/catalogs /app/photos /var/log/postgresql
