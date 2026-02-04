@@ -9,9 +9,9 @@ from unittest.mock import Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from lumina.api.app import app
 from lumina.db import get_db
 from lumina.db.models import Job
-from lumina.web.api import app
 
 pytestmark = pytest.mark.integration
 
