@@ -36,7 +36,7 @@ class TestWebCLI:
         catalog_path.mkdir()
 
         # Mock CatalogDB to raise an exception (catalog not in database)
-        with patch("lumina.cli.web.CatalogDB") as mock_catalog_db:
+        with patch("lumina.db.CatalogDB") as mock_catalog_db:
             mock_catalog_db.side_effect = Exception("Catalog not found")
 
             result = runner.invoke(web, [str(catalog_path)])
@@ -46,7 +46,7 @@ class TestWebCLI:
             assert "lumina-analyze" in result.output
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.CatalogDB")
+    @patch("lumina.db.CatalogDB")
     def test_web_basic_launch(
         self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
@@ -72,7 +72,7 @@ class TestWebCLI:
         mock_run.assert_called_once()
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.CatalogDB")
+    @patch("lumina.db.CatalogDB")
     def test_web_custom_host_port(
         self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
@@ -102,7 +102,7 @@ class TestWebCLI:
         assert call_kwargs["port"] == 9000
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.CatalogDB")
+    @patch("lumina.db.CatalogDB")
     def test_web_reload_mode(
         self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
@@ -128,7 +128,7 @@ class TestWebCLI:
         assert call_kwargs["reload"] is True
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.CatalogDB")
+    @patch("lumina.db.CatalogDB")
     def test_web_default_settings(
         self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
