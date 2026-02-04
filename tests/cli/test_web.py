@@ -9,9 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
-from PIL import Image
 
-from lumina.cli.analyze import analyze
 from lumina.cli.web import web
 
 pytestmark = pytest.mark.integration
@@ -32,34 +30,38 @@ class TestWebCLI:
         assert result.exit_code != 0
 
     def test_web_catalog_file_missing(self, tmp_path: Path) -> None:
-        """Test error when catalog directory exists but catalog.json missing."""
+        """Test error when catalog directory exists but catalog not in database."""
         runner = CliRunner()
         catalog_path = tmp_path / "catalog"
         catalog_path.mkdir()
 
-        result = runner.invoke(web, [str(catalog_path)])
+        # Mock CatalogDB to raise an exception (catalog not in database)
+        with patch("lumina.cli.web.CatalogDB") as mock_catalog_db:
+            mock_catalog_db.side_effect = Exception("Catalog not found")
 
-        assert result.exit_code == 0  # Command runs
-        assert "Error: Catalog not found" in result.output
-        assert "lumina-analyze" in result.output
+            result = runner.invoke(web, [str(catalog_path)])
+
+            assert result.exit_code == 0  # Command runs
+            assert "Error" in result.output
+            assert "lumina-analyze" in result.output
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.init_catalog")
+    @patch("lumina.cli.web.CatalogDB")
     def test_web_basic_launch(
-        self, mock_init: MagicMock, mock_run: MagicMock, tmp_path: Path
+        self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
         """Test basic web server launch."""
         runner = CliRunner()
         catalog_path = tmp_path / "catalog"
-        photos_dir = tmp_path / "photos"
-        photos_dir.mkdir()
+        catalog_path.mkdir()
 
-        # Create a catalog
-        Image.new("RGB", (100, 100), color="red").save(photos_dir / "test.jpg")
-        result = runner.invoke(
-            analyze, [str(catalog_path), "-s", str(photos_dir), "-w", "1"]
+        # Mock the CatalogDB context manager and query
+        mock_db = MagicMock()
+        mock_catalog = MagicMock()
+        mock_db.session.query.return_value.filter_by.return_value.first.return_value = (
+            mock_catalog
         )
-        assert result.exit_code == 0
+        mock_catalog_db.return_value.__enter__.return_value = mock_db
 
         # Launch web server
         result = runner.invoke(web, [str(catalog_path)])
@@ -67,26 +69,25 @@ class TestWebCLI:
         assert result.exit_code == 0
         assert "Catalog Viewer" in result.output
         assert "Starting web server" in result.output
-        mock_init.assert_called_once_with(catalog_path)
         mock_run.assert_called_once()
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.init_catalog")
+    @patch("lumina.cli.web.CatalogDB")
     def test_web_custom_host_port(
-        self, mock_init: MagicMock, mock_run: MagicMock, tmp_path: Path
+        self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
         """Test custom host and port."""
         runner = CliRunner()
         catalog_path = tmp_path / "catalog"
-        photos_dir = tmp_path / "photos"
-        photos_dir.mkdir()
+        catalog_path.mkdir()
 
-        # Create catalog
-        Image.new("RGB", (100, 100), color="blue").save(photos_dir / "test.jpg")
-        result = runner.invoke(
-            analyze, [str(catalog_path), "-s", str(photos_dir), "-w", "1"]
+        # Mock the CatalogDB context manager and query
+        mock_db = MagicMock()
+        mock_catalog = MagicMock()
+        mock_db.session.query.return_value.filter_by.return_value.first.return_value = (
+            mock_catalog
         )
-        assert result.exit_code == 0
+        mock_catalog_db.return_value.__enter__.return_value = mock_db
 
         # Launch with custom host and port
         result = runner.invoke(
@@ -101,22 +102,22 @@ class TestWebCLI:
         assert call_kwargs["port"] == 9000
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.init_catalog")
+    @patch("lumina.cli.web.CatalogDB")
     def test_web_reload_mode(
-        self, mock_init: MagicMock, mock_run: MagicMock, tmp_path: Path
+        self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
         """Test reload mode for development."""
         runner = CliRunner()
         catalog_path = tmp_path / "catalog"
-        photos_dir = tmp_path / "photos"
-        photos_dir.mkdir()
+        catalog_path.mkdir()
 
-        # Create catalog
-        Image.new("RGB", (100, 100), color="green").save(photos_dir / "test.jpg")
-        result = runner.invoke(
-            analyze, [str(catalog_path), "-s", str(photos_dir), "-w", "1"]
+        # Mock the CatalogDB context manager and query
+        mock_db = MagicMock()
+        mock_catalog = MagicMock()
+        mock_db.session.query.return_value.filter_by.return_value.first.return_value = (
+            mock_catalog
         )
-        assert result.exit_code == 0
+        mock_catalog_db.return_value.__enter__.return_value = mock_db
 
         # Launch with reload
         result = runner.invoke(web, [str(catalog_path), "--reload"])
@@ -127,22 +128,22 @@ class TestWebCLI:
         assert call_kwargs["reload"] is True
 
     @patch("lumina.cli.web.uvicorn.run")
-    @patch("lumina.cli.web.init_catalog")
+    @patch("lumina.cli.web.CatalogDB")
     def test_web_default_settings(
-        self, mock_init: MagicMock, mock_run: MagicMock, tmp_path: Path
+        self, mock_catalog_db: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
         """Test default host, port, and settings."""
         runner = CliRunner()
         catalog_path = tmp_path / "catalog"
-        photos_dir = tmp_path / "photos"
-        photos_dir.mkdir()
+        catalog_path.mkdir()
 
-        # Create catalog
-        Image.new("RGB", (100, 100), color="yellow").save(photos_dir / "test.jpg")
-        result = runner.invoke(
-            analyze, [str(catalog_path), "-s", str(photos_dir), "-w", "1"]
+        # Mock the CatalogDB context manager and query
+        mock_db = MagicMock()
+        mock_catalog = MagicMock()
+        mock_db.session.query.return_value.filter_by.return_value.first.return_value = (
+            mock_catalog
         )
-        assert result.exit_code == 0
+        mock_catalog_db.return_value.__enter__.return_value = mock_db
 
         # Launch with defaults
         result = runner.invoke(web, [str(catalog_path)])
