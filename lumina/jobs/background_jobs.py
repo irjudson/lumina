@@ -2,14 +2,16 @@
 
 import logging
 import os
+import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
-from datetime import datetime
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, Optional
 
-from ..db import get_db
+from ..db import get_db_context
 from ..db.models import Job
+from .types import JobContext
 
 logger = logging.getLogger(__name__)
 
@@ -18,22 +20,60 @@ MAX_WORKERS = int(os.getenv("LUMINA_MAX_JOB_WORKERS", "4"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("LUMINA_JOB_TIMEOUT", str(24 * 3600)))  # 24 hours
 MAX_RETRIES = int(os.getenv("LUMINA_JOB_MAX_RETRIES", "3"))
 RETRY_DELAY_SECONDS = 5
+ORPHANED_JOB_TIMEOUT_MINUTES = 60  # Jobs stuck in PROGRESS for 60+ min are orphaned
 
 # Global thread pool for job execution
 _executor: Optional[ThreadPoolExecutor] = None
 _active_jobs: Dict[str, Future[Any]] = {}
+_job_stop_flags: Dict[str, threading.Event] = {}  # Cooperative cancellation
+_initialized = False
 
 
 def get_executor() -> ThreadPoolExecutor:
     """Get or create the global thread pool executor."""
-    global _executor
+    global _executor, _initialized
     if _executor is None:
         _executor = ThreadPoolExecutor(
             max_workers=MAX_WORKERS,
             thread_name_prefix="lumina-job-",
         )
         logger.info(f"Created job executor with {MAX_WORKERS} workers")
+
+        # On first initialization, recover orphaned jobs
+        if not _initialized:
+            _initialized = True
+            _recover_orphaned_jobs()
+
     return _executor
+
+
+def _recover_orphaned_jobs() -> None:
+    """Find and fail jobs that were left in PROGRESS state (orphaned by restart)."""
+    try:
+        with get_db_context() as db:
+            # Find jobs stuck in PROGRESS that haven't been updated recently
+            cutoff_time = datetime.utcnow() - timedelta(
+                minutes=ORPHANED_JOB_TIMEOUT_MINUTES
+            )
+
+            orphaned = (
+                db.query(Job)
+                .filter(Job.status == "PROGRESS", Job.created_at < cutoff_time)
+                .all()
+            )
+
+            for job in orphaned:
+                logger.warning(f"Recovering orphaned job {job.id}")
+                job.status = "FAILURE"
+                job.error = "Job orphaned (container restart or crash)"
+                job.completed_at = datetime.utcnow()
+
+            if orphaned:
+                db.commit()
+                logger.info(f"Recovered {len(orphaned)} orphaned jobs")
+
+    except Exception as e:
+        logger.error(f"Failed to recover orphaned jobs: {e}")
 
 
 def create_job(
@@ -85,7 +125,7 @@ def update_job_status(
         error: Error message (for FAILURE)
     """
     try:
-        with next(get_db()) as db:
+        with get_db_context() as db:
             job = db.query(Job).filter(Job.id == job_id).first()
             if job:
                 job.status = status
@@ -125,17 +165,15 @@ def _is_retryable_error(error: Exception) -> bool:
 
 def _execute_job_with_retry(
     job_id: str,
-    func: Callable[..., Any],
-    *args: Any,
-    **kwargs: Any,
+    func: Callable[[JobContext], Any],
+    ctx: JobContext,
 ) -> Any:
     """Execute job function with retry logic.
 
     Args:
         job_id: Job ID
-        func: Function to execute
-        *args: Positional arguments
-        **kwargs: Keyword arguments
+        func: Function to execute (accepts JobContext)
+        ctx: Job context
 
     Returns:
         Job result
@@ -152,7 +190,7 @@ def _execute_job_with_retry(
                 time.sleep(RETRY_DELAY_SECONDS * attempt)  # Exponential backoff
 
             update_job_status(job_id, "PROGRESS")
-            result = func(*args, job_id=job_id, **kwargs)
+            result = func(ctx)
             return result
 
         except Exception as e:
@@ -171,32 +209,72 @@ def _execute_job_with_retry(
     raise last_error or Exception("Job failed with unknown error")
 
 
+def should_stop_job(job_id: str) -> bool:
+    """Check if job has been requested to stop (cooperative cancellation).
+
+    Job implementations should periodically call this and gracefully exit if True.
+
+    Args:
+        job_id: Job ID to check
+
+    Returns:
+        True if job should stop execution
+    """
+    stop_flag = _job_stop_flags.get(job_id)
+    return stop_flag is not None and stop_flag.is_set()
+
+
 def run_job_in_background(
     job_id: str,
-    func: Callable[..., Any],
-    *args: Any,
-    **kwargs: Any,
+    catalog_id: str,
+    func: Callable[[JobContext], Any],
+    parameters: Dict[str, Any],
 ) -> None:
     """Run a job function in a background thread with fault tolerance.
 
     Features:
     - ThreadPoolExecutor for resource limiting
     - Automatic retry for transient failures
+    - Cooperative cancellation via should_stop_job()
     - Timeout handling
     - Proper error logging and status updates
+    - Tracks active jobs in memory for monitoring
 
     Args:
         job_id: Job ID
-        func: Function to execute
-        *args: Positional arguments
-        **kwargs: Keyword arguments
+        catalog_id: Catalog ID
+        func: Function to execute (accepts JobContext)
+        parameters: Job parameters
     """
     executor = get_executor()
+
+    # Create stop flag for cooperative cancellation
+    _job_stop_flags[job_id] = threading.Event()
+
+    # Create job context
+    ctx = JobContext(
+        job_id=job_id,
+        catalog_id=catalog_id,
+        parameters=parameters,
+    )
 
     def _job_wrapper() -> Any:
         """Wrapper that handles execution, retries, and cleanup."""
         try:
-            result = _execute_job_with_retry(job_id, func, *args, **kwargs)
+            # Check if cancelled before starting
+            if should_stop_job(job_id):
+                logger.info(f"Job {job_id} cancelled before execution")
+                update_job_status(job_id, "FAILURE", error="Job cancelled by user")
+                return None
+
+            result = _execute_job_with_retry(job_id, func, ctx)
+
+            # Check if cancelled during execution
+            if should_stop_job(job_id):
+                logger.info(f"Job {job_id} cancelled during execution")
+                update_job_status(job_id, "FAILURE", error="Job cancelled by user")
+                return None
+
             update_job_status(job_id, "SUCCESS", result=result or {})
             return result
 
@@ -206,32 +284,17 @@ def run_job_in_background(
             raise
 
         finally:
-            # Remove from active jobs
+            # Cleanup
             _active_jobs.pop(job_id, None)
+            _job_stop_flags.pop(job_id, None)
 
     # Submit to thread pool
     future = executor.submit(_job_wrapper)
     _active_jobs[job_id] = future
 
-    # Add timeout callback (non-blocking)
-    def _timeout_handler() -> None:
-        """Handle job timeout in background."""
-        try:
-            future.result(timeout=JOB_TIMEOUT_SECONDS)
-        except TimeoutError:
-            logger.error(f"Job {job_id} timed out after {JOB_TIMEOUT_SECONDS}s")
-            update_job_status(
-                job_id,
-                "FAILURE",
-                error=f"Job timed out after {JOB_TIMEOUT_SECONDS} seconds",
-            )
-            future.cancel()
-        except Exception:
-            # Exception already logged by _job_wrapper
-            pass
-
-    # Start timeout monitoring in separate thread (non-blocking)
-    timeout_thread = executor.submit(_timeout_handler)  # noqa: F841
+    logger.info(
+        f"Job {job_id} submitted to executor (active jobs: {len(_active_jobs)})"
+    )
 
 
 def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
@@ -244,7 +307,7 @@ def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
         Job status dict or None if not found
     """
     try:
-        with next(get_db()) as db:
+        with get_db_context() as db:
             job = db.query(Job).filter(Job.id == job_id).first()
             if job:
                 return {
@@ -266,22 +329,49 @@ def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def cancel_job(job_id: str) -> bool:
-    """Cancel a running job.
+    """Cancel a running job using cooperative cancellation.
+
+    This sets a stop flag that job implementations can check via should_stop_job().
+    For jobs that don't check the flag, attempts to cancel the future.
 
     Args:
         job_id: Job ID to cancel
 
     Returns:
-        True if job was cancelled, False otherwise
+        True if cancellation was initiated, False otherwise
     """
+    # Set stop flag for cooperative cancellation
+    stop_flag = _job_stop_flags.get(job_id)
+    if stop_flag:
+        logger.info(f"Setting stop flag for job {job_id}")
+        stop_flag.set()
+
+    # Try to cancel the future (only works if not yet started)
     future = _active_jobs.get(job_id)
     if future:
         cancelled = future.cancel()
         if cancelled:
+            logger.info(f"Cancelled future for job {job_id}")
             update_job_status(job_id, "FAILURE", error="Job cancelled by user")
             _active_jobs.pop(job_id, None)
+            _job_stop_flags.pop(job_id, None)
             return True
-    return False
+        else:
+            # Already running, cooperative cancellation will handle it
+            logger.info(
+                f"Job {job_id} already running, cooperative cancellation in progress"
+            )
+            update_job_status(
+                job_id,
+                "PROGRESS",
+                progress={"phase": "cancelling", "message": "Cancellation requested"},
+            )
+            return True
+
+    # Job not in active list, mark as cancelled in DB
+    logger.info(f"Job {job_id} not active, marking as cancelled in database")
+    update_job_status(job_id, "FAILURE", error="Job cancelled by user")
+    return True
 
 
 def get_active_jobs() -> Dict[str, Future[Any]]:

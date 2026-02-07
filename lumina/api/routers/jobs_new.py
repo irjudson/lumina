@@ -42,6 +42,17 @@ class JobResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
 
+    @staticmethod
+    def _normalize_status(status: str) -> str:
+        """Convert backend status to frontend format (lowercase)."""
+        status_map = {
+            "PENDING": "pending",
+            "PROGRESS": "running",
+            "SUCCESS": "success",
+            "FAILURE": "failure",
+        }
+        return status_map.get(status, status.lower())
+
 
 @router.post("/submit", response_model=JobResponse)
 def submit_job(
@@ -55,6 +66,13 @@ def submit_job(
             status_code=400, detail=f"Unknown job type: {request.job_type}"
         )
 
+    # Verify catalog exists
+    from ...db.models import Catalog
+
+    catalog = db.query(Catalog).filter(Catalog.id == request.catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
     # Create job record
     job = create_job(
         db,
@@ -66,12 +84,17 @@ def submit_job(
     # Get job function
     job_func = JOB_FUNCTIONS[request.job_type]
 
-    # Run in background
-    run_job_in_background(job.id, job_func, **request.parameters)
+    # All jobs use the same standardized interface now
+    run_job_in_background(
+        job_id=job.id,
+        catalog_id=str(request.catalog_id),
+        func=job_func,
+        parameters=request.parameters,
+    )
 
     return JobResponse(
         id=job.id,
-        status=job.status,
+        status=JobResponse._normalize_status(job.status),
         progress=job.progress,
     )
 
@@ -85,7 +108,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
     return JobResponse(
         id=job.id,
-        status=job.status,
+        status=JobResponse._normalize_status(job.status),
         progress=job.progress,
         result=job.result,
         error=job.error,
@@ -108,7 +131,7 @@ def list_jobs(
     return [
         JobResponse(
             id=job.id,
-            status=job.status,
+            status=JobResponse._normalize_status(job.status),
             progress=job.progress,
             result=job.result,
             error=job.error,

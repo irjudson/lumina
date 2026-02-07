@@ -19,6 +19,7 @@ engine = create_engine(
     pool_size=10,  # Connection pool size
     max_overflow=20,  # Allow up to 20 additional connections
     echo=settings.sql_echo,  # Log SQL queries (debug mode)
+    connect_args={"client_encoding": "utf8"},  # Force UTF-8 encoding
 )
 
 # Create session factory

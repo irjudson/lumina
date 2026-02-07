@@ -6,26 +6,31 @@ from typing import Any, Callable, Dict
 
 from ..analysis.scanner import ImageScanner
 from ..db import CatalogDB as CatalogDatabase
-from .background_jobs import update_job_status
+from .background_jobs import should_stop_job, update_job_status
+from .types import JobContext
 
 logger = logging.getLogger(__name__)
 
 
-def scan_analyze_job(
-    catalog_id: str,
-    source_paths: list[str],
-    job_id: str,
-    workers: int = 4,
-    detect_duplicates: bool = False,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Run catalog scan and analysis."""
+def scan_analyze_job(ctx: JobContext) -> Dict[str, Any]:
+    """Run catalog scan and analysis with cooperative cancellation support."""
     try:
+        # Check for cancellation before starting
+        if should_stop_job(ctx.job_id):
+            logger.info(f"Scan job {ctx.job_id} cancelled before starting")
+            return {"cancelled": True}
+
+        # Get parameters (default to 25% of CPU cores)
+        import os
+
+        default_workers = max(1, int((os.cpu_count() or 4) * 0.25))
+        workers = ctx.get("workers", default_workers)
+
         # Convert source paths to Path objects
-        source_dirs = [Path(p) for p in source_paths]
+        source_dirs = [Path(p) for p in ctx.source_paths]
 
         # Open catalog database
-        with CatalogDatabase(catalog_id) as catalog_db:
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
             # Create scanner
             scanner = ImageScanner(
                 catalog_db,
@@ -35,13 +40,19 @@ def scan_analyze_job(
 
             # Update progress to indicate scanning started
             update_job_status(
-                job_id,
+                ctx.job_id,
                 "PROGRESS",
                 progress={"current": 0, "total": 0, "percent": 0, "phase": "scanning"},
             )
 
-            # Run scan
+            # Check for cancellation periodically during scan
+            # Note: ImageScanner doesn't support cancellation yet, but we check after
             scanner.scan_directories(source_dirs)
+
+            # Check if cancelled after scan
+            if should_stop_job(ctx.job_id):
+                logger.info(f"Scan job {ctx.job_id} cancelled during execution")
+                return {"cancelled": True, "partial_results": True}
 
             # Final result
             result = {
@@ -50,31 +61,21 @@ def scan_analyze_job(
                 "files_skipped": scanner.files_skipped,
                 "files_error": scanner.files_error,
                 "total_bytes": scanner.total_bytes,
-                "catalog_id": catalog_id,
+                "catalog_id": ctx.catalog_id,
             }
 
             return result
 
     except Exception:
-        logger.exception(f"Scan job {job_id} failed")
+        logger.exception(f"Scan job {ctx.job_id} failed")
         raise
 
 
-def detect_duplicates_job(
-    catalog_id: str,
-    job_id: str,
-    similarity_threshold: int = 5,
-    recompute_hashes: bool = False,
-    **kwargs: Any,
-) -> Dict[str, Any]:
+def detect_duplicates_job(ctx: JobContext) -> Dict[str, Any]:
     """Run duplicate detection using perceptual hashing.
 
     Args:
-        catalog_id: The catalog UUID
-        job_id: The background job ID
-        similarity_threshold: Maximum Hamming distance for similar images (default: 5)
-        recompute_hashes: Force recomputation of perceptual hashes
-        **kwargs: Additional options
+        ctx: Job context with catalog_id and parameters
 
     Returns:
         Dict with duplicate detection results
@@ -82,13 +83,17 @@ def detect_duplicates_job(
     from ..analysis.duplicate_detector import DuplicateDetector
 
     try:
-        with CatalogDatabase(catalog_id) as catalog_db:
+        # Get parameters
+        similarity_threshold = ctx.get("similarity_threshold", 5)
+        recompute_hashes = ctx.get("recompute_hashes", False)
+
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
 
             def progress_callback(current: int, total: int, message: str) -> None:
                 """Update job progress."""
                 percent = int((current / total) * 100) if total > 0 else 0
                 update_job_status(
-                    job_id,
+                    ctx.job_id,
                     "PROGRESS",
                     progress={
                         "current": current,
@@ -100,7 +105,7 @@ def detect_duplicates_job(
                 )
 
             update_job_status(
-                job_id,
+                ctx.job_id,
                 "PROGRESS",
                 progress={
                     "current": 0,
@@ -133,73 +138,728 @@ def detect_duplicates_job(
                 "groups_created": stats["total_groups"],
                 "redundant_images": stats["total_redundant"],
                 "groups_needing_review": stats["groups_needing_review"],
-                "catalog_id": catalog_id,
+                "catalog_id": ctx.catalog_id,
             }
 
             return result
 
     except Exception:
-        logger.exception(f"Duplicate detection job {job_id} failed")
+        logger.exception(f"Duplicate detection job {ctx.job_id} failed")
         raise
 
 
-def generate_thumbnails_job(
-    catalog_id: str, job_id: str, force: bool = False, **kwargs: Any
-) -> Dict[str, Any]:
+def generate_thumbnails_job(ctx: JobContext) -> Dict[str, Any]:
     """Generate thumbnails for catalog images."""
-    from .parallel_thumbnails import thumbnail_coordinator
+    from pathlib import Path
 
-    return thumbnail_coordinator(
-        job_id=job_id,
-        catalog_id=catalog_id,
-        force=force,
+    from ..shared.thumbnail_utils import THUMBNAIL_SIZES, generate_thumbnail
+
+    try:
+        force = ctx.get("force", False)
+        size_name = ctx.get("size", "medium")
+        size = THUMBNAIL_SIZES.get(size_name, THUMBNAIL_SIZES["medium"])
+
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
+            # Get all images from catalog
+            images_dict = catalog_db.get_all_images()
+            images = list(images_dict.values())
+
+            total_images = len(images)
+            thumbnails_generated = 0
+            thumbnails_skipped = 0
+            thumbnails_failed = 0
+
+            # Get thumbnails directory
+            thumbnails_dir = catalog_db.catalog_path / "thumbnails" / size_name
+            thumbnails_dir.mkdir(parents=True, exist_ok=True)
+
+            for i, image in enumerate(images):
+                # Update progress
+                percent = int((i / total_images) * 100) if total_images > 0 else 0
+                update_job_status(
+                    ctx.job_id,
+                    "PROGRESS",
+                    progress={
+                        "current": i,
+                        "total": total_images,
+                        "percent": percent,
+                        "phase": "generating_thumbnails",
+                    },
+                )
+
+                # Check if thumbnail already exists
+                thumbnail_path = thumbnails_dir / f"{image.checksum}.jpg"  # type: ignore[attr-defined]
+                if thumbnail_path.exists() and not force:
+                    thumbnails_skipped += 1
+                    continue
+
+                # Generate thumbnail
+                source_path = Path(image.source_path)  # type: ignore[arg-type]
+                if not source_path.exists():
+                    logger.warning(f"Source file not found: {source_path}")
+                    thumbnails_failed += 1
+                    continue
+
+                success = generate_thumbnail(source_path, thumbnail_path, size=size)
+                if success:
+                    thumbnails_generated += 1
+                else:
+                    thumbnails_failed += 1
+
+            return {
+                "thumbnails_generated": thumbnails_generated,
+                "thumbnails_skipped": thumbnails_skipped,
+                "thumbnails_failed": thumbnails_failed,
+                "total_images": total_images,
+                "size": size_name,
+                "catalog_id": ctx.catalog_id,
+            }
+
+    except Exception:
+        logger.exception(f"Thumbnail generation job {ctx.job_id} failed")
+        raise
+
+
+def detect_bursts_job(ctx: JobContext) -> Dict[str, Any]:
+    """Detect burst photo sequences using timestamp clustering algorithm."""
+    import uuid
+
+    from sqlalchemy import text
+
+    from ..analysis.burst_detector import BurstDetector, ImageInfo
+
+    try:
+        # Parameters
+        gap_threshold = ctx.get("gap_threshold", 2.0)
+        min_burst_size = ctx.get("min_burst_size", 3)
+
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
+            # Progress tracking
+            def update_progress(phase: str, percent: int, message: str = "") -> None:
+                update_job_status(
+                    ctx.job_id,
+                    "PROGRESS",
+                    progress={
+                        "current": percent,
+                        "total": 100,
+                        "percent": percent,
+                        "phase": phase,
+                        "message": message,
+                    },
+                )
+
+            update_progress("loading", 10, "Loading images")
+
+            # Check cancellation
+            if should_stop_job(ctx.job_id):
+                return {"cancelled": True}
+
+            # Load images with metadata
+            assert catalog_db.session is not None
+            result = catalog_db.session.execute(
+                text(
+                    """
+                    SELECT id, capture_time, camera_make, camera_model,
+                           quality_score, source_path, latitude, longitude, geohash
+                    FROM images
+                    WHERE catalog_id = :catalog_id
+                    AND capture_time IS NOT NULL
+                    ORDER BY capture_time
+                """
+                ),
+                {"catalog_id": ctx.catalog_id},
+            )
+
+            images = [
+                ImageInfo(
+                    image_id=str(row[0]),
+                    timestamp=row[1],
+                    camera_make=row[2],
+                    camera_model=row[3],
+                    quality_score=row[4] or 0.0,
+                    source_path=row[5],
+                    latitude=row[6],
+                    longitude=row[7],
+                    geohash=row[8],
+                )
+                for row in result.fetchall()
+            ]
+
+            update_progress("detecting", 40, f"Analyzing {len(images)} images")
+
+            # Check cancellation
+            if should_stop_job(ctx.job_id):
+                return {"cancelled": True}
+
+            # Detect bursts
+            detector = BurstDetector(
+                gap_threshold_seconds=gap_threshold,
+                min_burst_size=min_burst_size,
+            )
+            bursts = detector.detect_bursts(images)
+
+            update_progress("saving", 70, f"Saving {len(bursts)} bursts")
+
+            # Clear old bursts
+            assert catalog_db.session is not None
+            catalog_db.session.execute(
+                text("DELETE FROM bursts WHERE catalog_id = :catalog_id"),
+                {"catalog_id": ctx.catalog_id},
+            )
+
+            # Save bursts
+            total_images_in_bursts = 0
+            for burst in bursts:
+                burst_id = str(uuid.uuid4())
+
+                # Insert burst record
+                assert catalog_db.session is not None
+                catalog_db.session.execute(
+                    text(
+                        """
+                        INSERT INTO bursts (
+                            id, catalog_id, image_count, start_time, end_time,
+                            duration_seconds, camera_make, camera_model,
+                            best_image_id, selection_method, created_at
+                        ) VALUES (
+                            :id, :catalog_id, :image_count, :start_time, :end_time,
+                            :duration, :make, :model, :best_image, :method, NOW()
+                        )
+                    """
+                    ),
+                    {
+                        "id": burst_id,
+                        "catalog_id": ctx.catalog_id,
+                        "image_count": burst.image_count,
+                        "start_time": burst.start_time,
+                        "end_time": burst.end_time,
+                        "duration": burst.duration_seconds,
+                        "make": burst.camera_make,
+                        "model": burst.camera_model,
+                        "best_image": burst.best_image_id,
+                        "method": burst.selection_method,
+                    },
+                )
+
+                # Update images with burst_id
+                for idx, img in enumerate(burst.images):
+                    assert catalog_db.session is not None
+                    catalog_db.session.execute(
+                        text(
+                            """
+                            UPDATE images
+                            SET burst_id = :burst_id, burst_sequence = :sequence
+                            WHERE id = :image_id
+                        """
+                        ),
+                        {
+                            "burst_id": burst_id,
+                            "sequence": idx,
+                            "image_id": img.image_id,
+                        },
+                    )
+
+                total_images_in_bursts += burst.image_count
+
+            assert catalog_db.session is not None
+            catalog_db.session.commit()
+            update_progress("complete", 100, "Done")
+
+            return {
+                "bursts_detected": len(bursts),
+                "images_in_bursts": total_images_in_bursts,
+                "catalog_id": ctx.catalog_id,
+            }
+
+    except Exception:
+        logger.exception(f"Burst detection job {ctx.job_id} failed")
+        raise
+
+
+def auto_tag_job(ctx: JobContext) -> Dict[str, Any]:
+    """Auto-tag images using AI backends with GPU batch processing."""
+    import json
+    import os
+    from pathlib import Path
+    from typing import Optional, Union
+
+    from sqlalchemy import text
+
+    from ..analysis.image_tagger import (
+        CombinedTagger,
+        ImageTagger,
+        check_backends_available,
     )
+    from .tag_storage import store_image_tags
+
+    try:
+        # Parameters
+        backend = ctx.get("backend", "openclip")
+        model = ctx.get("model", None)
+        threshold = ctx.get("threshold", 0.25)
+        max_tags = ctx.get("max_tags", 10)
+        tag_mode = ctx.get("tag_mode", "untagged_only")
+        batch_size = ctx.get("batch_size", 32)
+
+        # Backend availability check
+        backends_status = check_backends_available()
+
+        if backend == "openclip" and not backends_status.get("openclip"):
+            raise RuntimeError(
+                "OpenCLIP backend not available. Install with: pip install open-clip-torch"
+            )
+        if backend == "ollama" and not backends_status.get("ollama"):
+            raise RuntimeError(
+                "Ollama backend not available. Ensure Ollama is running with a vision model."
+            )
+        if backend == "combined":
+            if not backends_status.get("openclip"):
+                raise RuntimeError(
+                    "Combined backend requires OpenCLIP. Install with: pip install open-clip-torch"
+                )
+            if not backends_status.get("ollama"):
+                raise RuntimeError(
+                    "Combined backend requires Ollama. Ensure Ollama is running with a vision model."
+                )
+
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
+            # Progress update helper
+            update_job_status(
+                ctx.job_id,
+                "PROGRESS",
+                progress={
+                    "current": 0,
+                    "total": 100,
+                    "percent": 0,
+                    "phase": "init",
+                    "backend": backend,
+                },
+            )
+
+            # Check cancellation
+            if should_stop_job(ctx.job_id):
+                return {"cancelled": True}
+
+            # Get images based on tag_mode
+            if tag_mode == "untagged_only":
+                # Only images without any tags
+                assert catalog_db.session is not None
+                result = catalog_db.session.execute(
+                    text(
+                        """
+                        SELECT i.id, i.source_path FROM images i
+                        WHERE i.catalog_id = :catalog_id
+                        AND i.file_type = 'image'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM image_tags it WHERE it.image_id = i.id
+                        )
+                    """
+                    ),
+                    {"catalog_id": ctx.catalog_id},
+                )
+            else:
+                # All images - for retagging
+                assert catalog_db.session is not None
+                result = catalog_db.session.execute(
+                    text(
+                        """
+                        SELECT i.id, i.source_path FROM images i
+                        WHERE i.catalog_id = :catalog_id
+                        AND i.file_type = 'image'
+                    """
+                    ),
+                    {"catalog_id": ctx.catalog_id},
+                )
+
+            images_to_tag = result.fetchall()
+            total_images = len(images_to_tag)
+
+            if total_images == 0:
+                # Check if all images are already tagged
+                assert catalog_db.session is not None
+                result = catalog_db.session.execute(
+                    text("SELECT COUNT(*) FROM images WHERE catalog_id = :catalog_id"),
+                    {"catalog_id": ctx.catalog_id},
+                )
+                total_in_catalog = result.scalar() or 0
+
+                if total_in_catalog > 0:
+                    return {
+                        "images_tagged": 0,
+                        "images_failed": 0,
+                        "total_images": total_in_catalog,
+                        "message": f"All {total_in_catalog} images already tagged",
+                        "catalog_id": ctx.catalog_id,
+                    }
+                else:
+                    return {
+                        "images_tagged": 0,
+                        "images_failed": 0,
+                        "total_images": 0,
+                        "message": "No images in catalog",
+                        "catalog_id": ctx.catalog_id,
+                    }
+
+            # GPU detection
+            device = "cpu"
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    device = "cuda"
+                    logger.info("GPU acceleration enabled")
+            except ImportError:
+                pass
+
+            # Initialize tagger
+            tagger: Union[CombinedTagger, ImageTagger]
+            if backend == "combined":
+                tagger = CombinedTagger(
+                    openclip_model=model or "ViT-B-32",
+                    ollama_model="llava",
+                    device=device,
+                    ollama_host=os.environ.get("OLLAMA_HOST"),
+                )
+            else:
+                tagger = ImageTagger(
+                    backend=backend,
+                    model=model,
+                    device=device if backend == "openclip" else None,
+                )
+
+            # Check for checkpoint to resume
+            def get_checkpoint() -> Optional[int]:
+                """Get the last checkpoint offset."""
+                assert catalog_db.session is not None
+                result = catalog_db.session.execute(
+                    text(
+                        """
+                        SELECT value FROM config
+                        WHERE catalog_id = :catalog_id AND key = :key
+                    """
+                    ),
+                    {
+                        "catalog_id": ctx.catalog_id,
+                        "key": f"auto_tag_checkpoint_{ctx.job_id}",
+                    },
+                )
+                row = result.fetchone()
+                if row:
+                    return row[0] if isinstance(row[0], int) else json.loads(row[0])
+                return None
+
+            def save_checkpoint(offset: int) -> None:
+                """Save checkpoint for resuming."""
+                assert catalog_db.session is not None
+                catalog_db.session.execute(
+                    text(
+                        """
+                        INSERT INTO config (catalog_id, key, value, updated_at)
+                        VALUES (:catalog_id, :key, :value, NOW())
+                        ON CONFLICT (catalog_id, key) DO UPDATE SET
+                            value = EXCLUDED.value,
+                            updated_at = EXCLUDED.updated_at
+                    """
+                    ),
+                    {
+                        "catalog_id": ctx.catalog_id,
+                        "key": f"auto_tag_checkpoint_{ctx.job_id}",
+                        "value": json.dumps(offset),
+                    },
+                )
+                assert catalog_db.session is not None
+                catalog_db.session.commit()
+
+            start_offset = get_checkpoint() or 0
+            if start_offset > 0:
+                logger.info(f"Resuming from checkpoint: {start_offset}/{total_images}")
+
+            tagged_count = 0
+            failed_count = 0
+
+            # Process images
+            if backend in ("openclip", "combined"):
+                # Batch processing for OpenCLIP
+                for batch_start in range(start_offset, total_images, batch_size):
+                    if should_stop_job(ctx.job_id):
+                        return {
+                            "cancelled": True,
+                            "images_tagged": tagged_count,
+                            "images_failed": failed_count,
+                            "total_images": total_images,
+                            "catalog_id": ctx.catalog_id,
+                        }
+
+                    batch_end = min(batch_start + batch_size, total_images)
+                    batch = images_to_tag[batch_start:batch_end]
+                    batch_paths: list[Union[str, Path]] = [
+                        Path(row[1]) for row in batch
+                    ]
+                    batch_ids = [row[0] for row in batch]
+
+                    # Update progress
+                    percent = (
+                        int((batch_start / total_images) * 100)
+                        if total_images > 0
+                        else 0
+                    )
+                    update_job_status(
+                        ctx.job_id,
+                        "PROGRESS",
+                        progress={
+                            "current": batch_start,
+                            "total": total_images,
+                            "percent": percent,
+                            "phase": "tagging",
+                            "backend": backend,
+                        },
+                    )
+
+                    try:
+                        # Tag batch
+                        if backend == "combined" and isinstance(tagger, CombinedTagger):
+                            # Combined backend with progress callback
+                            # Capture loop variable to avoid B023 closure issue
+                            _batch_start = batch_start
+
+                            def progress_cb(
+                                current: int,
+                                total: int,
+                                phase: str,
+                                _bs: int = _batch_start,
+                            ) -> None:
+                                update_job_status(
+                                    ctx.job_id,
+                                    "PROGRESS",
+                                    progress={
+                                        "current": _bs + current,
+                                        "total": total_images,
+                                        "percent": int(
+                                            ((_bs + current) / total_images) * 100
+                                        ),
+                                        "phase": "tagging",
+                                        "sub_phase": phase,
+                                    },
+                                )
+
+                            results = tagger.tag_batch(
+                                batch_paths,
+                                threshold=threshold,
+                                max_tags=max_tags,
+                                progress_callback=progress_cb,
+                            )
+                        else:
+                            results = tagger.tag_batch(
+                                batch_paths,
+                                threshold=threshold,
+                                max_tags=max_tags,
+                            )
+
+                        # Store tags and embeddings
+                        for img_id, img_path in zip(batch_ids, batch_paths):
+                            # img_path is always Path, but annotated as Union for batch_paths
+                            tags = results.get(
+                                (
+                                    img_path
+                                    if isinstance(img_path, Path)
+                                    else Path(img_path)
+                                ),
+                                [],
+                            )
+                            if tags:
+                                stored = store_image_tags(
+                                    catalog_db,
+                                    ctx.catalog_id,
+                                    str(img_id),
+                                    tags,
+                                    backend,
+                                )
+                                if stored > 0:
+                                    tagged_count += 1
+
+                            # Save CLIP embedding for semantic search
+                            if backend in ("openclip", "combined") and hasattr(
+                                tagger, "get_embedding"
+                            ):
+                                try:
+                                    embedding = tagger.get_embedding(img_path)
+                                    assert catalog_db.session is not None
+                                    catalog_db.session.execute(
+                                        text(
+                                            """
+                                            UPDATE images
+                                            SET clip_embedding = :embedding
+                                            WHERE id = :image_id
+                                        """
+                                        ),
+                                        {
+                                            "image_id": str(img_id),
+                                            "embedding": embedding,
+                                        },
+                                    )
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to save embedding for {img_id}: {e}"
+                                    )
+
+                        assert catalog_db.session is not None
+                        catalog_db.session.commit()
+
+                        # Save checkpoint after each batch
+                        save_checkpoint(batch_end)
+
+                    except Exception as batch_e:
+                        logger.warning(f"Batch tagging failed: {batch_e}")
+                        failed_count += len(batch)
+                        # Still save checkpoint so we don't reprocess failed batch
+                        save_checkpoint(batch_end)
+
+            else:  # ollama
+                # Sequential processing for Ollama
+                for i, (img_id, source_path) in enumerate(images_to_tag):
+                    if i < start_offset:
+                        continue
+
+                    if should_stop_job(ctx.job_id):
+                        return {
+                            "cancelled": True,
+                            "images_tagged": tagged_count,
+                            "images_failed": failed_count,
+                            "total_images": total_images,
+                            "catalog_id": ctx.catalog_id,
+                        }
+
+                    # Update progress
+                    percent = int((i / total_images) * 100) if total_images > 0 else 0
+                    update_job_status(
+                        ctx.job_id,
+                        "PROGRESS",
+                        progress={
+                            "current": i,
+                            "total": total_images,
+                            "percent": percent,
+                            "phase": "tagging",
+                            "current_file": Path(source_path).name,
+                        },
+                    )
+
+                    try:
+                        tags = tagger.tag_image(
+                            source_path,
+                            threshold=threshold,
+                            max_tags=max_tags,
+                        )
+
+                        if tags:
+                            stored = store_image_tags(
+                                catalog_db, ctx.catalog_id, str(img_id), tags, "ollama"
+                            )
+                            if stored > 0:
+                                tagged_count += 1
+
+                        # Commit and checkpoint every 10 images
+                        if (i + 1) % 10 == 0:
+                            assert catalog_db.session is not None
+                            catalog_db.session.commit()
+                            save_checkpoint(i + 1)
+
+                    except Exception as img_e:
+                        logger.warning(f"Failed to tag {source_path}: {img_e}")
+                        failed_count += 1
+
+                # Final commit
+                assert catalog_db.session is not None
+                catalog_db.session.commit()
+
+            # Cleanup
+            if hasattr(tagger, "cleanup"):
+                tagger.cleanup()
+
+            # Final progress
+            update_job_status(
+                ctx.job_id,
+                "PROGRESS",
+                progress={
+                    "current": total_images,
+                    "total": total_images,
+                    "percent": 100,
+                    "phase": "complete",
+                },
+            )
+
+            return {
+                "images_tagged": tagged_count,
+                "images_failed": failed_count,
+                "total_images": total_images,
+                "backend": backend,
+                "catalog_id": ctx.catalog_id,
+            }
+
+    except Exception:
+        logger.exception(f"Auto-tagging job {ctx.job_id} failed")
+        raise
 
 
-def detect_bursts_job(
-    catalog_id: str,
-    job_id: str,
-    gap_threshold: float = 2.0,
-    min_burst_size: int = 3,
-    batch_size: int = 5000,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Detect burst photo sequences."""
-    from .parallel_bursts import burst_coordinator
+def test_job(ctx: JobContext) -> Dict[str, Any]:
+    """Test job that simulates work with progress tracking and cancellation support.
 
-    return burst_coordinator(
-        job_id=job_id,
-        catalog_id=catalog_id,
-        gap_threshold=gap_threshold,
-        min_burst_size=min_burst_size,
-        batch_size=batch_size,
-    )
+    This job does nothing but sleep and report progress, useful for testing:
+    - Job execution (RUN)
+    - Progress tracking (TRACK)
+    - Cooperative cancellation (KILL)
+    """
+    import time
 
+    duration = ctx.get("duration_seconds", 30)
+    update_interval = ctx.get("update_interval_seconds", 1)
 
-def auto_tag_job(
-    catalog_id: str,
-    job_id: str,
-    backend: str = "openclip",
-    model: str = None,
-    threshold: float = 0.25,
-    max_tags: int = 10,
-    tag_mode: str = "untagged_only",
-    batch_size: int = 500,
-    **kwargs: Any,
-) -> Dict[str, Any]:
-    """Auto-tag images using AI models."""
-    from .parallel_tagging import tagging_coordinator
+    logger.info(f"Test job {ctx.job_id} starting (duration: {duration}s)")
 
-    return tagging_coordinator(
-        job_id=job_id,
-        catalog_id=catalog_id,
-        backend=backend,
-        model=model,
-        threshold=threshold,
-        max_tags=max_tags,
-        tag_mode=tag_mode,
-        batch_size=batch_size,
-    )
+    start_time = time.time()
+    iterations = int(duration / update_interval)
+
+    for i in range(iterations):
+        # Check if cancelled
+        if should_stop_job(ctx.job_id):
+            logger.info(
+                f"Test job {ctx.job_id} cancelled at iteration {i}/{iterations}"
+            )
+            return {
+                "status": "cancelled",
+                "iterations_completed": i,
+                "total_iterations": iterations,
+                "elapsed_seconds": int(time.time() - start_time),
+            }
+
+        # Report progress
+        percent = int((i / iterations) * 100)
+        update_job_status(
+            ctx.job_id,
+            "PROGRESS",
+            progress={
+                "current": i,
+                "total": iterations,
+                "percent": percent,
+                "phase": "processing",
+                "message": f"Iteration {i+1}/{iterations}",
+            },
+        )
+
+        logger.info(f"Test job {ctx.job_id}: {percent}% ({i+1}/{iterations})")
+
+        # Simulate work
+        time.sleep(update_interval)
+
+    elapsed = int(time.time() - start_time)
+    logger.info(f"Test job {ctx.job_id} completed in {elapsed}s")
+
+    return {
+        "status": "completed",
+        "iterations_completed": iterations,
+        "total_iterations": iterations,
+        "elapsed_seconds": elapsed,
+        "catalog_id": ctx.catalog_id,
+    }
 
 
 # Job registry
@@ -210,4 +870,5 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "generate_thumbnails": generate_thumbnails_job,
     "detect_bursts": detect_bursts_job,
     "auto_tag": auto_tag_job,
+    "test": test_job,  # Test job for verification
 }

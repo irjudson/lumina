@@ -16,7 +16,7 @@ services:
       - /home:/host/home:ro
       - /mnt/synology:/host/synology:ro
       # Development: mount source code for live reload
-      - ./lumina:/app/lumina
+      # - ./lumina:/app/lumina
       # Mount MPS directories for GPU sharing
       - /tmp/nvidia-mps:/tmp/nvidia-mps
       - /tmp/nvidia-log:/tmp/nvidia-log

@@ -770,7 +770,7 @@ def cancel_and_requeue_job(
     if job_func:
         # Note: countdown/delay not supported in threading system yet
         # Job starts immediately
-        run_job_in_background(new_job_id, job_func, **task_kwargs)
+        run_job_in_background(new_job_id, catalog_id, job_func, task_kwargs)
         logger.info(
             f"[{parent_job_id}] Queued continuation job {new_job_id} "
             f"(starting immediately)"

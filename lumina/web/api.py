@@ -80,7 +80,16 @@ app.include_router(catalogs_router)
 
 # Mount static files directory
 static_dir = Path(__file__).parent / "static"
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+assets_dir = static_dir / "assets"
+
+logger.info(f"Mounting static files from: {static_dir}")
+logger.info(f"Mounting assets from: {assets_dir}")
+
+# Mount assets directory first for proper MIME types
+app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+# Mount root static files (index.html, favicons, etc)
+app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
 # Global catalog instance
 _catalog: Optional[CatalogDatabase] = None
@@ -277,19 +286,6 @@ def get_catalog_db(catalog_id: str) -> CatalogDatabase:
         CatalogDatabase instance
     """
     return CatalogDatabase(catalog_id=catalog_id)
-
-
-@app.get("/", response_model=None)
-async def root() -> Union[HTMLResponse, Dict[str, Any]]:
-    """Serve the frontend UI."""
-    static_dir = Path(__file__).parent / "static"
-    index_file = static_dir / "index.html"
-
-    if index_file.exists():
-        with open(index_file, "r") as f:
-            return HTMLResponse(content=f.read())
-
-    return {"message": "Lumina Catalog API", "version": "2.0.0"}
 
 
 @app.get("/api")

@@ -55,28 +55,18 @@ RUN apt-get update && apt-get install -y \
     # Cleanup
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
+# Builder stage for Python dependencies
+FROM base as builder
 WORKDIR /app
-
-# Copy dependency files
 COPY pyproject.toml README.md ./
-
-# Install Python dependencies (base)
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -e .
-    # Install additional dependencies for web application
+    pip install --no-cache-dir .
 RUN pip install --no-cache-dir \
     pydantic-settings \
     uvicorn[standard] \
     click
-
-# Install GPU acceleration packages (PyTorch with CUDA support)
-# Using nightly build with CUDA 12.8 for RTX 5060 Ti Blackwell (sm_120) support
-# CUDA 12.8+ is required for Blackwell architecture (sm_120)
 RUN pip install --no-cache-dir --pre \
     torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu128
-
-# Install tagging dependencies (OpenCLIP and Ollama client)
 RUN pip install --no-cache-dir \
     open-clip-torch>=2.24.0 \
     ftfy>=6.1.0 \
@@ -84,20 +74,31 @@ RUN pip install --no-cache-dir \
 
 # Stage 1: Build Frontend
 FROM node:20-alpine as frontend-build
-WORKDIR /app/web/client
-COPY lumina/web/client/package*.json ./
+WORKDIR /app
+COPY package*.json ./
 RUN npm ci
-COPY lumina/web/client/ .
-RUN npm run build  # Outputs to /app/web/static
+COPY vite.config.ts ./
+COPY tsconfig.json ./
+COPY tsconfig.node.json ./
+COPY tailwind.config.js ./
+COPY postcss.config.js ./
+COPY src ./src
+COPY index.html ./
+RUN npm run build
 
-
-# Copy application code and set PATH
-COPY lumina/ ./lumina/
+# Final stage
+FROM base
+WORKDIR /app
 ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/bin:/app
+
+# Copy Python environment from builder stage
+COPY --from=builder /usr/local /usr/local
+
 # Copy application code
 COPY lumina/ ./lumina/
+
 # Copy built frontend assets from the build stage
-COPY --from=frontend-build /app/web/static /app/lumina/web/static
+COPY --from=frontend-build /app/dist /app/lumina/web/static
 
 # Create directories for catalogs and photos (PostgreSQL data dir will be created by initdb)
 RUN mkdir -p /app/catalogs /app/photos /var/log/postgresql
