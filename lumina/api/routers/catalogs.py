@@ -1518,47 +1518,11 @@ def start_duplicate_detection(
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
 
-    # Import Celery task - use parallel coordinator for better performance
-    from ...celery_app import app as celery_app
-    from ...db.models import Job
-
-    # Generate job ID upfront (used as both DB id and Celery task id)
-    job_id = str(uuid.uuid4())
-
-    # Create job record
-    job = Job(
-        id=job_id,
-        catalog_id=catalog_id,
-        job_type="detect_duplicates",
-        status="pending",
+    # Legacy endpoint - use /api/jobs/submit instead
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint is deprecated. Use POST /api/jobs/submit with job_type='detect_duplicates'",
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    # Start Celery task with same ID - use parallel coordinator pattern
-    # Use send_task with the registered task name, not the function object
-    task = celery_app.send_task(
-        "duplicates_coordinator",  # Task name as registered in @app.task(name=...)
-        kwargs={
-            "catalog_id": str(catalog_id),
-            "similarity_threshold": similarity_threshold,
-            "recompute_hashes": recompute_hashes,
-        },
-        task_id=job_id,
-    )
-
-    logger.info(
-        f"Started duplicate detection job {job.id} for catalog {catalog_id} "
-        f"(threshold={similarity_threshold}, recompute={recompute_hashes})"
-    )
-
-    return {
-        "job_id": str(job.id),
-        "task_id": task.id,
-        "status": "pending",
-        "message": f"Duplicate detection started for catalog {catalog.name}",
-    }
 
 
 @router.post("/{catalog_id}/auto-tag")
@@ -2397,45 +2361,11 @@ def start_burst_detection(
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
 
-    # Import Celery task
-    from ...db.models import Job
-    from ...jobs.tasks import detect_bursts_task
-
-    # Generate job ID upfront (used as both DB id and Celery task id)
-    job_id = str(uuid.uuid4())
-
-    # Create job record
-    job = Job(
-        id=job_id,
-        catalog_id=catalog_id,
-        job_type="detect_bursts",
-        status="pending",
+    # Legacy endpoint - use /api/jobs/submit instead
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint is deprecated. Use POST /api/jobs/submit with job_type='detect_bursts'",
     )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-
-    # Start Celery task with same ID
-    task = detect_bursts_task.apply_async(
-        kwargs={
-            "catalog_id": str(catalog_id),
-            "gap_threshold": gap_threshold,
-            "min_burst_size": min_burst_size,
-        },
-        task_id=job_id,
-    )
-
-    logger.info(
-        f"Started burst detection job {job.id} for catalog {catalog_id} "
-        f"(gap_threshold={gap_threshold}, min_burst_size={min_burst_size})"
-    )
-
-    return {
-        "job_id": str(job.id),
-        "task_id": task.id,
-        "status": "pending",
-        "message": f"Burst detection started for catalog {catalog.name}",
-    }
 
 
 @router.get("/{catalog_id}/bursts/stats")
