@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Union
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -205,13 +205,13 @@ def create_app() -> FastAPI:
         # Serve index.html for SPA routes (Vue Router)
         from fastapi.responses import FileResponse, HTMLResponse
 
-        @app.get("/")
+        @app.get("/", response_class=FileResponse)
         async def serve_root() -> FileResponse:
             """Serve index.html for root path."""
             return FileResponse(static_dir / "index.html")
 
-        @app.get("/{full_path:path}")
-        async def serve_spa(full_path: str) -> Union[FileResponse, HTMLResponse]:
+        @app.get("/{full_path:path}", response_model=None)
+        async def serve_spa(full_path: str) -> Any:
             """Serve index.html for all non-API, non-asset routes (SPA support)."""
             # Check if file exists in static dir
             file_path = static_dir / full_path
