@@ -1,20 +1,19 @@
 """
-Generic Parallel Job Framework.
+Generic Job Framework (Sequential/Serial Execution).
 
-This module provides a unified framework for defining and managing parallel
-jobs that follow a common pattern:
+This module provides a unified framework for defining and managing jobs
+that follow a common pattern:
 1. Discover work items for a catalog
-2. Process items in parallel batches
+2. Process items sequentially in batches
 3. Optionally finalize/aggregate results
 
-The framework replaces multiple similar parallel_*.py implementations with
-a single, configurable job definition system.
+Note: All parallel/threading functionality has been removed. Jobs now execute
+sequentially (serially) to simplify debugging and avoid concurrency issues.
 """
 
 from __future__ import annotations
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar
 
@@ -27,10 +26,13 @@ T = TypeVar("T")
 @dataclass
 class ParallelJob(Generic[T]):
     """
-    Definition of a parallel processing job.
+    Definition of a sequential processing job (name kept for backward compatibility).
 
-    A ParallelJob captures all the configuration needed to run a parallel
+    A job captures all the configuration needed to run a sequential
     job across a catalog, including discovery, processing, and finalization.
+
+    Note: Despite the name "ParallelJob", this now executes SEQUENTIALLY (serially).
+    The name is kept for backward compatibility with existing code.
 
     Type Parameters:
         T: The type of work items (e.g., str for image paths, tuple for pairs)
@@ -41,7 +43,7 @@ class ParallelJob(Generic[T]):
         process: Function that processes a single work item
         finalize: Optional function to aggregate results after all processing
         batch_size: Number of items per batch (default: 1000)
-        max_workers: Maximum parallel workers (default: 4)
+        max_workers: IGNORED - kept for API compatibility (always executes sequentially)
         retry_on_failure: Whether to retry failed items (default: True)
         max_retries: Maximum retry attempts per item (default: 3)
         timeout_seconds: Optional timeout per item in seconds
@@ -52,7 +54,7 @@ class ParallelJob(Generic[T]):
     process: Callable[..., Dict[str, Any]]
     finalize: Optional[Callable[..., Dict[str, Any]]] = None
     batch_size: int = 1000
-    max_workers: int = 4
+    max_workers: int = 1  # Ignored - kept for API compatibility
     retry_on_failure: bool = True
     max_retries: int = 3
     timeout_seconds: Optional[int] = None
@@ -140,12 +142,12 @@ def register_job(job: ParallelJob) -> ParallelJob:
 
 class JobExecutor(Generic[T]):
     """
-    Executor for parallel jobs.
+    Executor for sequential (serial) jobs.
 
-    JobExecutor manages the execution lifecycle of a ParallelJob:
+    JobExecutor manages the execution lifecycle of a job:
     1. Discovery - find work items for a catalog
     2. Batching - split items into batches
-    3. Processing - execute batches in parallel
+    3. Processing - execute batches SEQUENTIALLY (no parallelism)
     4. Finalization - aggregate results
 
     Type Parameters:
@@ -157,13 +159,13 @@ class JobExecutor(Generic[T]):
         Initialize a job executor.
 
         Args:
-            job: The ParallelJob definition to execute
+            job: The job definition to execute
         """
         self.job = job
 
     def run(self, job_id: str, catalog_id: str, **kwargs: Any) -> Dict[str, Any]:
         """
-        Execute the job for a catalog.
+        Execute the job for a catalog sequentially (no parallelism).
 
         Runs the full job lifecycle: discover -> process -> finalize.
 
@@ -181,7 +183,7 @@ class JobExecutor(Generic[T]):
                 - Plus any keys returned by finalize()
         """
         logger.info(
-            f"Starting job {self.job.name} (id={job_id}) for catalog {catalog_id}"
+            f"Starting job {self.job.name} (id={job_id}) for catalog {catalog_id} (sequential mode)"
         )
 
         # Phase 1: Discovery
@@ -196,24 +198,20 @@ class JobExecutor(Generic[T]):
         batches = self._create_batches(items)
         logger.info(f"Created {len(batches)} batches for job {job_id}")
 
-        # Phase 3: Process in parallel
+        # Phase 3: Process sequentially (no parallelism)
         all_results: List[Dict[str, Any]] = []
         all_errors: List[Dict[str, Any]] = []
         success_count = 0
         error_count = 0
 
-        with ThreadPoolExecutor(max_workers=self.job.max_workers) as executor:
-            futures = {
-                executor.submit(self._process_batch, batch, catalog_id, kwargs): i
-                for i, batch in enumerate(batches)
-            }
-
-            for future in as_completed(futures):
-                batch_result = future.result()
-                all_results.extend(batch_result["results"])
-                all_errors.extend(batch_result["errors"])
-                success_count += batch_result["success_count"]
-                error_count += batch_result["error_count"]
+        # Process each batch sequentially
+        for i, batch in enumerate(batches):
+            logger.debug(f"Processing batch {i+1}/{len(batches)} ({len(batch)} items)")
+            batch_result = self._process_batch(batch, catalog_id, kwargs)
+            all_results.extend(batch_result["results"])
+            all_errors.extend(batch_result["errors"])
+            success_count += batch_result["success_count"]
+            error_count += batch_result["error_count"]
 
         # Phase 4: Finalize
         result = {

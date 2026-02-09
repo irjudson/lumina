@@ -26,10 +26,53 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
+def _populate_reference_tables(db: Session) -> None:
+    """Populate reference tables with required data."""
+    from .models import ImageStatus
+
+    # Check if ImageStatus table needs population
+    if db.query(ImageStatus).count() == 0:
+        logger.info("Populating image_statuses reference table...")
+        statuses = [
+            ImageStatus(id="active", name="Active", description="Normal visible image"),
+            ImageStatus(
+                id="rejected",
+                name="Rejected",
+                description="Rejected from burst/duplicate review",
+            ),
+            ImageStatus(
+                id="archived", name="Archived", description="Manually archived by user"
+            ),
+            ImageStatus(
+                id="flagged",
+                name="Flagged",
+                description="Flagged for review or special attention",
+            ),
+        ]
+        db.add_all(statuses)
+        db.commit()
+        logger.info(f"Added {len(statuses)} image status records")
+    else:
+        logger.debug(
+            f"ImageStatus table already populated ({db.query(ImageStatus).count()} records)"
+        )
+
+
 def init_db() -> None:
-    """Initialize database by creating all tables."""
+    """Initialize database by creating all tables and populating reference data."""
     logger.info("Initializing database...")
+
+    # Create all tables
     Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created")
+
+    # Populate reference tables
+    db = SessionLocal()
+    try:
+        _populate_reference_tables(db)
+    finally:
+        db.close()
+
     logger.info("Database initialized successfully")
 
 

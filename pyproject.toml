@@ -225,6 +225,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = [
     "lumina.db.*",
+    "lumina.models.*",
     "lumina.core.catalog_config",
     "lumina.analysis.scanner",
     "lumina.analysis.duplicate_detector",
@@ -233,7 +234,7 @@ module = [
     "lumina.api.routers.*",
     "lumina.cli.analyze",
     "lumina.cli.web",
-    "lumina.jobs.tasks",
+    "lumina.jobs.*",
 ]
 ignore_errors = true
 

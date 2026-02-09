@@ -1,6 +1,9 @@
 """Scan job definition.
 
 Discovers and processes media files in source directories.
+
+Note: This job definition uses the ParallelJob framework, but all execution
+is now sequential (serial). The ParallelJob name is kept for backward compatibility.
 """
 
 import hashlib
@@ -178,6 +181,7 @@ def finalize_scan(
 
 
 # Register the scan job with the global registry
+# Note: max_workers is ignored - all processing is sequential
 scan_job: ParallelJob[str] = register_job(
     ParallelJob(
         name="scan",
@@ -185,6 +189,6 @@ scan_job: ParallelJob[str] = register_job(
         process=process_file,
         finalize=finalize_scan,
         batch_size=500,
-        max_workers=4,
+        max_workers=1,  # Ignored - sequential processing only
     )
 )

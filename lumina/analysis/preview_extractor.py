@@ -143,7 +143,8 @@ class PreviewExtractor:
             workers: Number of worker processes (default: CPU count)
         """
         self.catalog = catalog
-        self.workers = workers or mp.cpu_count()
+        # Sequential mode by default
+        self.workers = workers if workers is not None else 1
         self.preview_cache = PreviewCache(catalog.catalog_path)
 
     def extract_previews(self, force: bool = False) -> None:
@@ -223,13 +224,21 @@ class PreviewExtractor:
                 (image, self.catalog.catalog_path) for image in images_to_process
             ]
 
-            # Process in parallel
-            with mp.Pool(processes=self.workers) as pool:
+            # Process sequentially or in parallel
+            pool = None
+            if self.workers == 1:
+                # Sequential processing
+                results_iter = (_extract_preview_worker(args) for args in worker_args)
+            else:
+                # Parallel processing (if workers > 1)
+                pool = mp.Pool(processes=self.workers)
                 chunk_size = max(1, len(images_to_process) // (self.workers * 4))
-
-                for image_id, preview_bytes, error_msg in pool.imap_unordered(
+                results_iter = pool.imap_unordered(
                     _extract_preview_worker, worker_args, chunk_size
-                ):
+                )
+
+            try:
+                for image_id, preview_bytes, error_msg in results_iter:
                     if preview_bytes:
                         # Store in cache
                         if self.preview_cache.store_preview(image_id, preview_bytes):
@@ -245,6 +254,11 @@ class PreviewExtractor:
                             )
 
                     progress.advance(task)
+            finally:
+                # Clean up pool if created
+                if pool is not None:
+                    pool.close()
+                    pool.join()
 
         # Log summary
         logger.info(

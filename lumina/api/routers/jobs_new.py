@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...db.models import Job
 from ...jobs.background_jobs import cancel_job as cancel_job_bg
-from ...jobs.background_jobs import create_job, run_job_in_background
+from ...jobs.background_jobs import create_job, has_active_job, run_job_in_background
 from ...jobs.job_implementations import JOB_FUNCTIONS
 
 logger = logging.getLogger(__name__)
@@ -31,16 +31,25 @@ class JobSubmitRequest(BaseModel):
     catalog_id: str
     job_type: str
     parameters: Dict[str, Any] = {}
+    job_source: str = "user"  # 'user' or 'warehouse'
+    priority: int = 100  # Default to high priority for user jobs
+    warehouse_trigger: Optional[str] = None
 
 
 class JobResponse(BaseModel):
     """Job response."""
 
     id: str
+    job_type: Optional[str] = None
+    catalog_id: Optional[str] = None
     status: str
     progress: Optional[Dict[str, Any]] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    job_source: Optional[str] = "user"
+    priority: Optional[int] = 50
+    warehouse_trigger: Optional[str] = None
+    created_at: Optional[str] = None
 
     @staticmethod
     def _normalize_status(status: str) -> str:
@@ -73,12 +82,22 @@ def submit_job(
     if not catalog:
         raise HTTPException(status_code=404, detail="Catalog not found")
 
+    # Check for duplicate active job
+    if has_active_job(request.catalog_id, request.job_type):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {request.job_type} job is already pending or running for this catalog",
+        )
+
     # Create job record
     job = create_job(
         db,
         job_type=request.job_type,
         catalog_id=request.catalog_id,
         parameters=request.parameters,
+        job_source=request.job_source,
+        priority=request.priority,
+        warehouse_trigger=request.warehouse_trigger,
     )
 
     # Get job function
@@ -94,8 +113,14 @@ def submit_job(
 
     return JobResponse(
         id=job.id,
+        job_type=job.job_type,
+        catalog_id=str(job.catalog_id) if job.catalog_id else None,
         status=JobResponse._normalize_status(job.status),
         progress=job.progress,
+        job_source=job.job_source,
+        priority=job.priority,
+        warehouse_trigger=job.warehouse_trigger,
+        created_at=job.created_at.isoformat() if job.created_at else None,
     )
 
 
@@ -108,10 +133,16 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 
     return JobResponse(
         id=job.id,
+        job_type=job.job_type,
+        catalog_id=str(job.catalog_id) if job.catalog_id else None,
         status=JobResponse._normalize_status(job.status),
         progress=job.progress,
         result=job.result,
         error=job.error,
+        job_source=job.job_source,
+        priority=job.priority,
+        warehouse_trigger=job.warehouse_trigger,
+        created_at=job.created_at.isoformat() if job.created_at else None,
     )
 
 
@@ -131,10 +162,16 @@ def list_jobs(
     return [
         JobResponse(
             id=job.id,
+            job_type=job.job_type,
+            catalog_id=str(job.catalog_id) if job.catalog_id else None,
             status=JobResponse._normalize_status(job.status),
             progress=job.progress,
             result=job.result,
             error=job.error,
+            job_source=job.job_source,
+            priority=job.priority,
+            warehouse_trigger=job.warehouse_trigger,
+            created_at=job.created_at.isoformat() if job.created_at else None,
         )
         for job in jobs
     ]

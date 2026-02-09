@@ -13,7 +13,7 @@ if [ ! -f "/var/lib/postgresql/14/main/postgresql.conf" ]; then
     rm -rf /var/lib/postgresql/14/main/.[!.]*
     chown -R postgres:postgres /var/lib/postgresql
 
-    su - postgres -c "/usr/lib/postgresql/14/bin/initdb -D /var/lib/postgresql/14/main" 2>&1
+    su - postgres -c "/usr/lib/postgresql/14/bin/initdb -D /var/lib/postgresql/14/main --encoding=UTF8 --locale=C" 2>&1
 
     # Configure PostgreSQL
     echo "host all all 127.0.0.1/32 md5" >> /var/lib/postgresql/14/main/pg_hba.conf
@@ -42,7 +42,7 @@ done
 # Create user and database if they don't exist
 echo "Setting up database..."
 su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_user WHERE usename = 'pg'\" | grep -q 1 || psql -U postgres -c \"CREATE USER pg WITH SUPERUSER PASSWORD 'buffalo-jump';\""
-su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'lumina'\" | grep -q 1 || psql -U postgres -c \"CREATE DATABASE lumina OWNER pg;\""
+su - postgres -c "psql -U postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'lumina'\" | grep -q 1 || psql -U postgres -c \"CREATE DATABASE lumina OWNER pg ENCODING 'UTF8';\""
 
 # Enable pgvector extension
 echo "Enabling pgvector extension..."

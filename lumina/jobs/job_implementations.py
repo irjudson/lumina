@@ -13,29 +13,46 @@ logger = logging.getLogger(__name__)
 
 
 def scan_analyze_job(ctx: JobContext) -> Dict[str, Any]:
-    """Run catalog scan and analysis with cooperative cancellation support."""
+    """Run catalog scan and analysis with cooperative cancellation support.
+
+    Note: All processing is now sequential (serial) - no parallel workers.
+    """
     try:
         # Check for cancellation before starting
         if should_stop_job(ctx.job_id):
             logger.info(f"Scan job {ctx.job_id} cancelled before starting")
             return {"cancelled": True}
 
-        # Get parameters (default to 25% of CPU cores)
-        import os
-
-        default_workers = max(1, int((os.cpu_count() or 4) * 0.25))
-        workers = ctx.get("workers", default_workers)
+        # Workers parameter is ignored - sequential processing only
+        workers = 1
 
         # Convert source paths to Path objects
         source_dirs = [Path(p) for p in ctx.source_paths]
 
         # Open catalog database
         with CatalogDatabase(ctx.catalog_id) as catalog_db:
-            # Create scanner
+            # Progress callback for scanner
+            def progress_callback(current: int, total: int, message: str) -> None:
+                """Update job progress from scanner."""
+                percent = int((current / total) * 100) if total > 0 else 0
+                update_job_status(
+                    ctx.job_id,
+                    "PROGRESS",
+                    progress={
+                        "current": current,
+                        "total": total,
+                        "percent": percent,
+                        "phase": "scanning",
+                        "message": message,
+                    },
+                )
+
+            # Create scanner with progress callback
             scanner = ImageScanner(
                 catalog_db,
                 workers=workers,
-                perf_tracker=None,  # TODO: Add progress tracking
+                perf_tracker=None,
+                progress_callback=progress_callback,
             )
 
             # Update progress to indicate scanning started
@@ -62,6 +79,9 @@ def scan_analyze_job(ctx: JobContext) -> Dict[str, Any]:
                 "files_error": scanner.files_error,
                 "total_bytes": scanner.total_bytes,
                 "catalog_id": ctx.catalog_id,
+                # Add fields expected by frontend
+                "images_found": scanner.files_added,  # For now, count all as images
+                "videos_found": 0,  # TODO: Track separately
             }
 
             return result
@@ -149,20 +169,26 @@ def detect_duplicates_job(ctx: JobContext) -> Dict[str, Any]:
 
 
 def generate_thumbnails_job(ctx: JobContext) -> Dict[str, Any]:
-    """Generate thumbnails for catalog images."""
+    """Generate thumbnails for catalog images and update DB records."""
     from pathlib import Path
 
+    from ..db.models import Image
     from ..shared.thumbnail_utils import THUMBNAIL_SIZES, generate_thumbnail
 
     try:
         force = ctx.get("force", False)
         size_name = ctx.get("size", "medium")
         size = THUMBNAIL_SIZES.get(size_name, THUMBNAIL_SIZES["medium"])
+        batch_commit_size = 50
 
         with CatalogDatabase(ctx.catalog_id) as catalog_db:
-            # Get all images from catalog
-            images_dict = catalog_db.get_all_images()
-            images = list(images_dict.values())
+            session = catalog_db.session
+            assert session is not None
+
+            # Query Image ORM objects directly so we can update them
+            images = (
+                session.query(Image).filter(Image.catalog_id == ctx.catalog_id).all()
+            )
 
             total_images = len(images)
             thumbnails_generated = 0
@@ -174,37 +200,75 @@ def generate_thumbnails_job(ctx: JobContext) -> Dict[str, Any]:
             thumbnails_dir.mkdir(parents=True, exist_ok=True)
 
             for i, image in enumerate(images):
-                # Update progress
-                percent = int((i / total_images) * 100) if total_images > 0 else 0
-                update_job_status(
-                    ctx.job_id,
-                    "PROGRESS",
-                    progress={
-                        "current": i,
-                        "total": total_images,
-                        "percent": percent,
-                        "phase": "generating_thumbnails",
-                    },
-                )
+                # Cooperative cancellation check
+                if should_stop_job(ctx.job_id):
+                    logger.info(
+                        f"Thumbnail job {ctx.job_id} cancelled at {i}/{total_images}"
+                    )
+                    session.commit()
+                    return {
+                        "cancelled": True,
+                        "thumbnails_generated": thumbnails_generated,
+                        "thumbnails_skipped": thumbnails_skipped,
+                        "thumbnails_failed": thumbnails_failed,
+                        "total_images": total_images,
+                        "catalog_id": ctx.catalog_id,
+                    }
 
-                # Check if thumbnail already exists
-                thumbnail_path = thumbnails_dir / f"{image.checksum}.jpg"  # type: ignore[attr-defined]
+                # Update progress every 10 images
+                if i % 10 == 0:
+                    percent = int((i / total_images) * 100) if total_images > 0 else 0
+                    update_job_status(
+                        ctx.job_id,
+                        "PROGRESS",
+                        progress={
+                            "current": i,
+                            "total": total_images,
+                            "percent": percent,
+                            "phase": "generating_thumbnails",
+                        },
+                    )
+
+                # Check if thumbnail already exists on disk
+                thumbnail_path = thumbnails_dir / f"{image.checksum}.jpg"
                 if thumbnail_path.exists() and not force:
+                    # Ensure DB is up to date even for existing thumbnails
+                    if not image.thumbnail_path:
+                        rel_path = str(
+                            thumbnail_path.relative_to(catalog_db.catalog_path)
+                        )
+                        image.thumbnail_path = rel_path
+                        flags = dict(image.processing_flags or {})
+                        flags["thumbnail_generated"] = True
+                        image.processing_flags = flags
                     thumbnails_skipped += 1
-                    continue
-
-                # Generate thumbnail
-                source_path = Path(image.source_path)  # type: ignore[arg-type]
-                if not source_path.exists():
-                    logger.warning(f"Source file not found: {source_path}")
-                    thumbnails_failed += 1
-                    continue
-
-                success = generate_thumbnail(source_path, thumbnail_path, size=size)
-                if success:
-                    thumbnails_generated += 1
                 else:
-                    thumbnails_failed += 1
+                    # Generate thumbnail
+                    source_path = Path(image.source_path)
+                    if not source_path.exists():
+                        logger.warning(f"Source file not found: {source_path}")
+                        thumbnails_failed += 1
+                        continue
+
+                    success = generate_thumbnail(source_path, thumbnail_path, size=size)
+                    if success:
+                        rel_path = str(
+                            thumbnail_path.relative_to(catalog_db.catalog_path)
+                        )
+                        image.thumbnail_path = rel_path
+                        flags = dict(image.processing_flags or {})
+                        flags["thumbnail_generated"] = True
+                        image.processing_flags = flags
+                        thumbnails_generated += 1
+                    else:
+                        thumbnails_failed += 1
+
+                # Commit in batches
+                if (i + 1) % batch_commit_size == 0:
+                    session.commit()
+
+            # Final commit
+            session.commit()
 
             return {
                 "thumbnails_generated": thumbnails_generated,
@@ -254,13 +318,38 @@ def detect_bursts_job(ctx: JobContext) -> Dict[str, Any]:
             if should_stop_job(ctx.job_id):
                 return {"cancelled": True}
 
-            # Load images with metadata
+            # Pre-flight check: ensure metadata columns are populated
             assert catalog_db.session is not None
+            populated_check = catalog_db.session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM images
+                    WHERE catalog_id = :catalog_id
+                    AND COALESCE(processing_flags->>'metadata_columns_populated', 'false') = 'true'
+                """
+                ),
+                {"catalog_id": ctx.catalog_id},
+            )
+            populated_count = populated_check.scalar() or 0
+            if populated_count == 0:
+                total_check = catalog_db.session.execute(
+                    text("SELECT COUNT(*) FROM images WHERE catalog_id = :catalog_id"),
+                    {"catalog_id": ctx.catalog_id},
+                )
+                total_count = total_check.scalar() or 0
+                if total_count > 0:
+                    raise RuntimeError(
+                        f"No images have metadata columns populated ({total_count} images exist). "
+                        "Run the 'extract_metadata_columns' job first."
+                    )
+
+            # Load images with metadata
             result = catalog_db.session.execute(
                 text(
                     """
                     SELECT id, capture_time, camera_make, camera_model,
-                           quality_score, source_path, latitude, longitude, geohash
+                           quality_score, source_path, latitude, longitude,
+                           COALESCE(geohash_6, '') as geohash
                     FROM images
                     WHERE catalog_id = :catalog_id
                     AND capture_time IS NOT NULL
@@ -800,6 +889,284 @@ def auto_tag_job(ctx: JobContext) -> Dict[str, Any]:
         raise
 
 
+def extract_metadata_columns_job(ctx: JobContext) -> Dict[str, Any]:
+    """Extract metadata from JSONB columns into queryable typed columns.
+
+    Reads dates and metadata JSONB, populates dedicated columns (capture_time,
+    camera_make, etc.), and sets processing_flags.metadata_columns_populated.
+    """
+    import json
+    from datetime import datetime as dt
+
+    from sqlalchemy import text
+
+    try:
+        force = ctx.get("force", False)
+        batch_size = 100
+
+        with CatalogDatabase(ctx.catalog_id) as catalog_db:
+            assert catalog_db.session is not None
+
+            # Count images needing processing
+            if force:
+                count_result = catalog_db.session.execute(
+                    text("SELECT COUNT(*) FROM images WHERE catalog_id = :catalog_id"),
+                    {"catalog_id": ctx.catalog_id},
+                )
+            else:
+                count_result = catalog_db.session.execute(
+                    text(
+                        """
+                        SELECT COUNT(*) FROM images
+                        WHERE catalog_id = :catalog_id
+                        AND COALESCE(processing_flags->>'metadata_columns_populated', 'false') != 'true'
+                    """
+                    ),
+                    {"catalog_id": ctx.catalog_id},
+                )
+            total_count = count_result.scalar() or 0
+
+            if total_count == 0:
+                return {
+                    "images_processed": 0,
+                    "message": "All images already have metadata columns populated",
+                    "catalog_id": ctx.catalog_id,
+                }
+
+            update_job_status(
+                ctx.job_id,
+                "PROGRESS",
+                progress={
+                    "current": 0,
+                    "total": total_count,
+                    "percent": 0,
+                    "phase": "extracting_metadata",
+                },
+            )
+
+            # Known column mappings from metadata JSONB
+            metadata_column_map = {
+                "camera_make": "camera_make",
+                "camera_model": "camera_model",
+                "lens_model": "lens_model",
+                "width": "width",
+                "height": "height",
+                "iso": "iso",
+                "aperture": "aperture",
+                "shutter_speed": "shutter_speed",
+                "focal_length": "focal_length",
+                "gps_latitude": "latitude",
+                "gps_longitude": "longitude",
+                "gps_altitude": "gps_altitude",
+                "orientation": "orientation",
+                "format": "format",
+            }
+
+            # Keys that are expected in metadata JSONB but not mapped to columns
+            known_non_column_keys = {
+                "exif",
+                "resolution",
+                "size_bytes",
+                "geohash",
+                "flash",
+                "artist",
+                "copyright",
+                "perceptual_hash_dhash",
+                "perceptual_hash_ahash",
+                "perceptual_hash_whash",
+                "merged_from",
+            }
+
+            unknown_fields_seen = set()
+            images_processed = 0
+            offset = 0
+
+            while True:
+                if should_stop_job(ctx.job_id):
+                    logger.info(
+                        f"Extract metadata job {ctx.job_id} cancelled at {images_processed}/{total_count}"
+                    )
+                    return {
+                        "cancelled": True,
+                        "images_processed": images_processed,
+                        "total_images": total_count,
+                        "catalog_id": ctx.catalog_id,
+                    }
+
+                # Fetch a batch
+                if force:
+                    batch_result = catalog_db.session.execute(
+                        text(
+                            """
+                            SELECT id, dates, metadata, processing_flags,
+                                   geohash_4, geohash_6, geohash_8
+                            FROM images
+                            WHERE catalog_id = :catalog_id
+                            ORDER BY id
+                            LIMIT :limit OFFSET :offset
+                        """
+                        ),
+                        {
+                            "catalog_id": ctx.catalog_id,
+                            "limit": batch_size,
+                            "offset": offset,
+                        },
+                    )
+                else:
+                    batch_result = catalog_db.session.execute(
+                        text(
+                            """
+                            SELECT id, dates, metadata, processing_flags,
+                                   geohash_4, geohash_6, geohash_8
+                            FROM images
+                            WHERE catalog_id = :catalog_id
+                            AND COALESCE(processing_flags->>'metadata_columns_populated', 'false') != 'true'
+                            ORDER BY id
+                            LIMIT :limit
+                        """
+                        ),
+                        {"catalog_id": ctx.catalog_id, "limit": batch_size},
+                    )
+
+                rows = batch_result.fetchall()
+                if not rows:
+                    break
+
+                for row in rows:
+                    image_id = row[0]
+                    dates = row[1] or {}
+                    metadata = row[2] or {}
+                    flags = dict(row[3] or {})
+                    existing_geohash_4 = row[4]
+                    existing_geohash_6 = row[5]
+                    existing_geohash_8 = row[6]
+
+                    # Extract capture_time from dates JSONB
+                    capture_time = None
+                    selected_date = dates.get("selected_date")
+                    if selected_date:
+                        if isinstance(selected_date, str):
+                            try:
+                                capture_time = dt.fromisoformat(
+                                    selected_date.replace("Z", "+00:00")
+                                )
+                            except (ValueError, TypeError):
+                                pass
+                        elif isinstance(selected_date, dt):
+                            capture_time = selected_date
+
+                    capture_time_source = dates.get("selected_source")
+                    date_confidence = dates.get("confidence")
+
+                    # Extract columns from metadata JSONB
+                    column_values = {}
+                    for json_key, col_name in metadata_column_map.items():
+                        val = metadata.get(json_key)
+                        if val is not None:
+                            column_values[col_name] = val
+
+                    # Collect unmapped metadata keys into metadata_extra
+                    all_known_keys = (
+                        set(metadata_column_map.keys()) | known_non_column_keys
+                    )
+                    extra = {}
+                    for key, val in metadata.items():
+                        if key not in all_known_keys and val is not None:
+                            extra[key] = val
+                            unknown_fields_seen.add(key)
+
+                    # Populate geohash columns if GPS present and geohash available
+                    geohash_updates = {}
+                    geohash_val = metadata.get("geohash")
+                    if geohash_val and isinstance(geohash_val, str):
+                        if not existing_geohash_4 and len(geohash_val) >= 4:
+                            geohash_updates["geohash_4"] = geohash_val[:4]
+                        if not existing_geohash_6 and len(geohash_val) >= 6:
+                            geohash_updates["geohash_6"] = geohash_val[:6]
+                        if not existing_geohash_8 and len(geohash_val) >= 8:
+                            geohash_updates["geohash_8"] = geohash_val[:8]
+
+                    # Mark as populated
+                    flags["metadata_columns_populated"] = True
+
+                    # Build UPDATE SET clause dynamically
+                    set_parts = [
+                        "capture_time = :capture_time",
+                        "capture_time_source = :capture_time_source",
+                        "date_confidence = :date_confidence",
+                        "processing_flags = :flags::jsonb",
+                    ]
+                    params = {
+                        "image_id": image_id,
+                        "capture_time": capture_time,
+                        "capture_time_source": capture_time_source,
+                        "date_confidence": date_confidence,
+                        "flags": json.dumps(flags),
+                    }
+
+                    for col_name, val in column_values.items():
+                        set_parts.append(f"{col_name} = :{col_name}")
+                        params[col_name] = val
+
+                    if extra:
+                        set_parts.append("metadata_extra = :metadata_extra::jsonb")
+                        params["metadata_extra"] = json.dumps(extra)
+
+                    for gh_col, gh_val in geohash_updates.items():
+                        set_parts.append(f"{gh_col} = :{gh_col}")
+                        params[gh_col] = gh_val
+
+                    catalog_db.session.execute(
+                        text(
+                            f"UPDATE images SET {', '.join(set_parts)} WHERE id = :image_id"
+                        ),
+                        params,
+                    )
+
+                    images_processed += 1
+
+                # Commit batch
+                catalog_db.session.commit()
+                offset += batch_size
+
+                # Update progress
+                percent = (
+                    int((images_processed / total_count) * 100)
+                    if total_count > 0
+                    else 0
+                )
+                update_job_status(
+                    ctx.job_id,
+                    "PROGRESS",
+                    progress={
+                        "current": images_processed,
+                        "total": total_count,
+                        "percent": percent,
+                        "phase": "extracting_metadata",
+                    },
+                )
+
+            # Log unknown fields for future migration planning
+            if unknown_fields_seen:
+                logger.info(
+                    f"Metadata fields without dedicated columns: {sorted(unknown_fields_seen)}. "
+                    "Consider adding columns in a future migration."
+                )
+
+            return {
+                "images_processed": images_processed,
+                "total_images": total_count,
+                "unknown_metadata_fields": (
+                    sorted(unknown_fields_seen) if unknown_fields_seen else []
+                ),
+                "catalog_id": ctx.catalog_id,
+            }
+
+    except Exception:
+        logger.exception(f"Extract metadata columns job {ctx.job_id} failed")
+        raise
+
+
 def test_job(ctx: JobContext) -> Dict[str, Any]:
     """Test job that simulates work with progress tracking and cancellation support.
 
@@ -870,5 +1237,6 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "generate_thumbnails": generate_thumbnails_job,
     "detect_bursts": detect_bursts_job,
     "auto_tag": auto_tag_job,
+    "extract_metadata_columns": extract_metadata_columns_job,
     "test": test_job,  # Test job for verification
 }

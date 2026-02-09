@@ -16,11 +16,19 @@ from .types import JobContext
 logger = logging.getLogger(__name__)
 
 # Configuration
-MAX_WORKERS = int(os.getenv("LUMINA_MAX_JOB_WORKERS", "4"))
+MAX_WORKERS = int(os.getenv("LUMINA_MAX_WORKERS", "3"))
 JOB_TIMEOUT_SECONDS = int(os.getenv("LUMINA_JOB_TIMEOUT", str(24 * 3600)))  # 24 hours
 MAX_RETRIES = int(os.getenv("LUMINA_JOB_MAX_RETRIES", "3"))
 RETRY_DELAY_SECONDS = 5
 ORPHANED_JOB_TIMEOUT_MINUTES = 60  # Jobs stuck in PROGRESS for 60+ min are orphaned
+
+# Priority levels for job scheduling
+PRIORITY_USER_IMMEDIATE = 100  # User clicked button, blocking UI
+PRIORITY_USER_BATCH = 80  # Bulk operations
+PRIORITY_WAREHOUSE_CRITICAL = 40  # Critical maintenance
+PRIORITY_WAREHOUSE_HIGH = 30  # Low confidence tags
+PRIORITY_WAREHOUSE_MEDIUM = 20  # Regular maintenance
+PRIORITY_WAREHOUSE_LOW = 10  # Nice-to-have
 
 # Global thread pool for job execution
 _executor: Optional[ThreadPoolExecutor] = None
@@ -81,6 +89,9 @@ def create_job(
     job_type: str,
     catalog_id: str,
     parameters: Dict[str, Any],
+    job_source: str = "user",
+    priority: int = 50,
+    warehouse_trigger: Optional[str] = None,
 ) -> Job:
     """Create a job record in the database.
 
@@ -89,6 +100,9 @@ def create_job(
         job_type: Type of job (scan, detect_duplicates, etc.)
         catalog_id: Catalog ID
         parameters: Job parameters
+        job_source: Source of job ('user' or 'warehouse')
+        priority: Job priority (0-100, higher = more urgent)
+        warehouse_trigger: Description of what triggered warehouse job
 
     Returns:
         Created Job instance
@@ -101,6 +115,10 @@ def create_job(
         parameters=parameters,
         progress={"current": 0, "total": 0, "percent": 0},
         created_at=datetime.utcnow(),
+        job_source=job_source,
+        priority=priority,
+        warehouse_trigger=warehouse_trigger,
+        scheduled_at=datetime.utcnow() if job_source == "warehouse" else None,
     )
     db_session.add(job)
     db_session.commit()
@@ -224,6 +242,33 @@ def should_stop_job(job_id: str) -> bool:
     return stop_flag is not None and stop_flag.is_set()
 
 
+def has_active_job(catalog_id: str, job_type: str) -> bool:
+    """Check if there's already a PENDING or PROGRESS job of the same type for this catalog.
+
+    Args:
+        catalog_id: Catalog ID
+        job_type: Job type string
+
+    Returns:
+        True if an active job of the same type exists
+    """
+    try:
+        with get_db_context() as db:
+            existing = (
+                db.query(Job)
+                .filter(
+                    Job.catalog_id == catalog_id,
+                    Job.job_type == job_type,
+                    Job.status.in_(["PENDING", "PROGRESS"]),
+                )
+                .first()
+            )
+            return existing is not None
+    except Exception as e:
+        logger.error(f"Failed to check for active job: {e}")
+        return False
+
+
 def run_job_in_background(
     job_id: str,
     catalog_id: str,
@@ -322,6 +367,9 @@ def get_job_status(job_id: str) -> Optional[Dict[str, Any]]:
                     "completed_at": (
                         job.completed_at.isoformat() if job.completed_at else None
                     ),
+                    "job_source": job.job_source,
+                    "priority": job.priority,
+                    "warehouse_trigger": job.warehouse_trigger,
                 }
     except Exception as e:
         logger.error(f"Failed to get job {job_id} status: {e}")

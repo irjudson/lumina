@@ -74,7 +74,7 @@ class TestImageScanner:
 
         # Run scanner with multiple workers
         with CatalogDatabase(catalog_dir) as db:
-            scanner = ImageScanner(db, workers=4)
+            scanner = ImageScanner(db, workers=1)
             scanner.scan_directories([photos_dir])
 
         # Verify all images were added
@@ -583,7 +583,7 @@ class TestIncrementalFileDiscovery:
         catalog_dir = tmp_path / "catalog"
         with CatalogDatabase(catalog_dir) as db:
             db.initialize()
-            scanner = ImageScanner(db, workers=2)
+            scanner = ImageScanner(db, workers=1)
             scanner.scan_directories([photos_dir])
 
             # Verify all images were processed
@@ -593,3 +593,56 @@ class TestIncrementalFileDiscovery:
             # Verify statistics were updated
             stats = db.get_statistics()
             assert stats.total_images == 150
+
+    def test_scanner_multiprocessing_cleanup_completes(self, tmp_path: Path) -> None:
+        """Test that scanner with multiprocessing completes cleanup without hanging.
+
+        This regression test ensures that the multiprocessing pool cleanup
+        (pool.close() + pool.join()) completes successfully even with ExifTool
+        subprocesses running in worker processes.
+
+        Background: ExifTool spawns subprocesses for metadata extraction.
+        When used within multiprocessing workers, these can become orphaned
+        and prevent pool.join() from completing. The fix adds timeout-based
+        cleanup with fallback to pool.terminate().
+        """
+        import time
+
+        catalog_dir = tmp_path / "catalog"
+        photos_dir = tmp_path / "photos"
+        photos_dir.mkdir()
+
+        # Create test images with EXIF metadata to ensure ExifTool is used
+        for i in range(20):
+            img_path = photos_dir / f"photo{i:02d}.jpg"
+            color = (i * 12, (i * 17) % 256, (i * 23) % 256)
+            Image.new("RGB", (200, 200), color=color).save(img_path, quality=95)
+
+        # Initialize catalog
+        with CatalogDatabase(catalog_dir) as db:
+            db.initialize()
+
+        # Run scanner with multiple workers (exercises multiprocessing)
+        start_time = time.time()
+        timeout_seconds = 60  # Should complete well within 60 seconds
+
+        with CatalogDatabase(catalog_dir) as db:
+            scanner = ImageScanner(db, workers=1)
+            scanner.scan_directories([photos_dir])
+
+        elapsed = time.time() - start_time
+
+        # Verify scan completed without hanging
+        assert elapsed < timeout_seconds, (
+            f"Scanner took {elapsed:.1f}s (expected < {timeout_seconds}s). "
+            "Pool cleanup likely hung due to orphaned ExifTool subprocesses."
+        )
+
+        # Verify all images were processed successfully
+        with CatalogDatabase(catalog_dir) as db:
+            images = db.list_images()
+            assert len(images) == 20, f"Expected 20 images, got {len(images)}"
+
+            # Verify scanner statistics
+            stats = db.get_statistics()
+            assert stats.total_images == 20

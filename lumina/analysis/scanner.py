@@ -6,7 +6,6 @@ This replaces the SQLite-based scanner with a proper ORM-based implementation.
 
 import hashlib
 import logging
-import multiprocessing as mp
 import os
 import time
 from contextlib import nullcontext
@@ -17,7 +16,7 @@ from typing import Iterator, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from lumina.shared import compute_checksum, get_file_type
-from lumina.shared.thumbnail_utils import generate_thumbnail, get_thumbnail_path
+from lumina.shared.thumbnail_utils import get_thumbnail_path
 
 from ..core.performance_stats import PerformanceTracker
 from ..core.types import CatalogPhase, FileType, ImageRecord, ImageStatus
@@ -27,12 +26,72 @@ from .metadata import MetadataExtractor
 logger = logging.getLogger(__name__)
 
 
-def _process_file_worker(file_path: Path) -> Optional[Tuple[ImageRecord, int]]:
+def _populate_metadata_columns(image: "Image", dates_obj, metadata_obj) -> None:
+    """Populate queryable metadata columns on an Image ORM object.
+
+    Args:
+        image: Image ORM object to update
+        dates_obj: DateInfo pydantic model (or None)
+        metadata_obj: ImageMetadata pydantic model (or None)
     """
-    Worker function for parallel file processing.
+    if dates_obj:
+        if dates_obj.selected_date:
+            image.capture_time = dates_obj.selected_date
+        if dates_obj.selected_source:
+            image.capture_time_source = dates_obj.selected_source
+        if dates_obj.confidence:
+            image.date_confidence = dates_obj.confidence
+
+    if metadata_obj:
+        if metadata_obj.camera_make:
+            image.camera_make = metadata_obj.camera_make
+        if metadata_obj.camera_model:
+            image.camera_model = metadata_obj.camera_model
+        if metadata_obj.lens_model:
+            image.lens_model = metadata_obj.lens_model
+        if metadata_obj.width is not None:
+            image.width = metadata_obj.width
+        if metadata_obj.height is not None:
+            image.height = metadata_obj.height
+        if metadata_obj.iso is not None:
+            image.iso = metadata_obj.iso
+        if metadata_obj.aperture is not None:
+            image.aperture = metadata_obj.aperture
+        if metadata_obj.shutter_speed:
+            image.shutter_speed = metadata_obj.shutter_speed
+        if metadata_obj.focal_length is not None:
+            image.focal_length = metadata_obj.focal_length
+        if metadata_obj.gps_latitude is not None:
+            image.latitude = metadata_obj.gps_latitude
+        if metadata_obj.gps_longitude is not None:
+            image.longitude = metadata_obj.gps_longitude
+        if metadata_obj.gps_altitude is not None:
+            image.gps_altitude = metadata_obj.gps_altitude
+        if metadata_obj.orientation is not None:
+            image.orientation = metadata_obj.orientation
+        if metadata_obj.format:
+            image.format = metadata_obj.format
+
+        # Populate geohash columns from metadata geohash
+        if metadata_obj.geohash and isinstance(metadata_obj.geohash, str):
+            gh = metadata_obj.geohash
+            if not image.geohash_4 and len(gh) >= 4:
+                image.geohash_4 = gh[:4]
+            if not image.geohash_6 and len(gh) >= 6:
+                image.geohash_6 = gh[:6]
+            if not image.geohash_8 and len(gh) >= 8:
+                image.geohash_8 = gh[:8]
+
+
+def _process_file_sequential(
+    file_path: Path, extractor: MetadataExtractor
+) -> Optional[Tuple[ImageRecord, int]]:
+    """
+    Process a single file sequentially.
 
     Args:
         file_path: Path to the file to process
+        extractor: MetadataExtractor instance (reused across files)
 
     Returns:
         Tuple of (ImageRecord, file_size) if successful, None if skipped/failed
@@ -53,13 +112,11 @@ def _process_file_worker(file_path: Path) -> Optional[Tuple[ImageRecord, int]]:
             logger.warning(f"Failed to compute checksum for {file_path}")
             return None
 
-        # Extract metadata (each worker needs its own extractor)
-        with MetadataExtractor() as extractor:
-            metadata = extractor.extract_metadata(file_path, file_type)
-            dates = extractor.extract_dates(file_path, metadata)
+        # Extract metadata
+        metadata = extractor.extract_metadata(file_path, file_type)
+        dates = extractor.extract_dates(file_path, metadata)
 
         # Create image record
-        # Note: id will be set later by the scanner to include catalog_id
         image = ImageRecord(
             id=checksum,  # Temporary - will be updated by scanner
             source_path=file_path,
@@ -89,8 +146,9 @@ class ImageScannerORM:
         session: Session,
         catalog_id: str,
         catalog_path: Path,
-        workers: int = 4,
+        workers: int = 1,  # Ignored - kept for API compatibility
         perf_tracker: Optional[PerformanceTracker] = None,
+        progress_callback: Optional[callable] = None,
     ):
         """
         Initialize the scanner with SQLAlchemy session.
@@ -99,16 +157,18 @@ class ImageScannerORM:
             session: SQLAlchemy session
             catalog_id: Catalog UUID
             catalog_path: Path to catalog directory (for thumbnails)
-            workers: Number of parallel workers for processing
+            workers: Number of parallel workers (IGNORED - sequential processing only)
             perf_tracker: Optional performance tracker
+            progress_callback: Optional callback(current, total, message) for progress updates
         """
         self.session = session
         self.catalog_id = catalog_id
         self.catalog_path = (
             Path(catalog_path) if not isinstance(catalog_path, Path) else catalog_path
         )
-        self.workers = workers
+        self.workers = 1  # Always 1 - sequential processing only
         self.perf_tracker = perf_tracker
+        self.progress_callback = progress_callback
 
         # Track scanning statistics
         self.files_added = 0
@@ -119,14 +179,21 @@ class ImageScannerORM:
         self.start_time = None
         self.end_time = None
 
+        # Track total files for progress reporting
+        self._total_files = 0
+        self._processed_files = 0
+        self._files_discovered = 0
+        self._last_progress_time = None
+
     def scan_directories(self, directories: List[Path]) -> None:
         """
         Scan directories for images and videos using incremental discovery.
+        All processing is now sequential (serial) - no parallelism.
 
         Args:
             directories: List of directories to scan
         """
-        logger.info(f"Scanning {len(directories)} directories (ORM mode)")
+        logger.info(f"Scanning {len(directories)} directories (sequential mode)")
         print(f"DEBUG: scan_directories called with {directories}", flush=True)
         self.start_time = time.time()
 
@@ -150,7 +217,9 @@ class ImageScannerORM:
             current_batch = []
             files_discovered = 0
 
-            logger.info("Starting incremental file discovery and processing...")
+            logger.info(
+                "Starting incremental file discovery and processing (sequential)..."
+            )
 
             for directory in directories:
                 logger.info(f"Scanning directory: {directory}")
@@ -159,6 +228,25 @@ class ImageScannerORM:
                 for file_path in self._discover_files_incrementally(Path(directory)):
                     current_batch.append(file_path)
                     files_discovered += 1
+                    self._files_discovered = files_discovered
+
+                    # Update progress (discovery phase - every 50 files or every 2 seconds)
+                    now = time.time()
+                    should_update = files_discovered % 50 == 0 or (
+                        self._last_progress_time and now - self._last_progress_time >= 2
+                    )
+
+                    if self.progress_callback and should_update:
+                        elapsed = now - self.start_time
+                        rate = files_discovered / elapsed if elapsed > 0 else 0
+                        # Use 0 as total during discovery (unknown total)
+                        # Current = files discovered so far
+                        self.progress_callback(
+                            files_discovered,
+                            0,  # Total unknown during discovery
+                            f"Discovering files... {files_discovered} found ({rate:.1f} files/s)",
+                        )
+                        self._last_progress_time = now
 
                     # Process batch when it reaches batch_size
                     if len(current_batch) >= batch_size:
@@ -169,10 +257,31 @@ class ImageScannerORM:
                         self._process_files(current_batch)
                         current_batch = []
 
+                        # Update progress after processing batch
+                        if self.progress_callback:
+                            elapsed = time.time() - self.start_time
+                            rate = self._processed_files / elapsed if elapsed > 0 else 0
+                            self.progress_callback(
+                                self._processed_files,
+                                files_discovered,
+                                f"Processing... {self._processed_files}/{files_discovered} ({rate:.1f} files/s)",
+                            )
+                            self._last_progress_time = time.time()
+
             # Process remaining files
             if current_batch:
                 logger.info(f"Processing final batch of {len(current_batch)} files")
                 self._process_files(current_batch)
+
+            # Final progress update
+            if self.progress_callback:
+                elapsed = time.time() - self.start_time
+                rate = self._processed_files / elapsed if elapsed > 0 else 0
+                self.progress_callback(
+                    self._processed_files,
+                    files_discovered,
+                    f"Complete: {self._processed_files} files ({rate:.1f} files/s)",
+                )
 
         self.end_time = time.time()
         self._update_statistics()
@@ -233,18 +342,18 @@ class ImageScannerORM:
 
     def _process_files(self, file_paths: List[Path]) -> None:
         """
-        Process a batch of files in parallel.
+        Process a batch of files sequentially (serial processing only).
 
         Args:
             file_paths: List of file paths to process
         """
-        if self.workers > 1:
-            # Process files in parallel
-            with mp.Pool(processes=self.workers) as pool:
-                results = pool.map(_process_file_worker, file_paths)
-        else:
-            # Process files sequentially
-            results = [_process_file_worker(f) for f in file_paths]
+        # Create a single metadata extractor to reuse across all files in this batch
+        with MetadataExtractor() as extractor:
+            # Process files sequentially - no parallelism
+            results = [_process_file_sequential(f, extractor) for f in file_paths]
+
+        # Count processed files for progress tracking
+        self._processed_files += len(file_paths)
 
         # Track checksums in this batch to avoid duplicates within the batch
         batch_checksums = set()
@@ -273,11 +382,9 @@ class ImageScannerORM:
             if existing:
                 # Check if the existing record needs updating (incomplete scan)
                 flags = existing.processing_flags or {}
-                needs_update = (
-                    not flags.get("metadata_extracted", False)
-                    or not flags.get("dates_extracted", False)
-                    or not flags.get("thumbnail_generated", False)
-                )
+                needs_update = not flags.get(
+                    "metadata_extracted", False
+                ) or not flags.get("dates_extracted", False)
 
                 if needs_update:
                     # Update the existing record with new metadata
@@ -292,22 +399,8 @@ class ImageScannerORM:
             # Track this checksum for the current batch
             batch_checksums.add(image_record.checksum)
 
-            # Generate thumbnail for images and videos
+            # Thumbnails are generated by the background generate_thumbnails job
             thumbnail_path = None
-            if image_record.file_type in (FileType.IMAGE, FileType.VIDEO):
-                try:
-                    thumbnail_full_path = get_thumbnail_path(
-                        image_record.checksum,
-                        self.catalog_path / "thumbnails",
-                    )
-
-                    if generate_thumbnail(file_path, thumbnail_full_path):
-                        # Store relative path from catalog root
-                        thumbnail_path = str(
-                            thumbnail_full_path.relative_to(self.catalog_path)
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to generate thumbnail for {file_path}: {e}")
 
             # Generate unique ID per catalog (catalog_id + checksum hash)
             unique_id = hashlib.sha256(
@@ -373,6 +466,11 @@ class ImageScannerORM:
                 processing_flags=processing_flags,
             )
 
+            # Populate queryable metadata columns inline
+            _populate_metadata_columns(image, image_record.dates, image_record.metadata)
+            processing_flags["metadata_columns_populated"] = True
+            image.processing_flags = processing_flags
+
             self.session.add(image)
             self.files_added += 1
             logger.debug(f"Added: {file_path}")
@@ -410,29 +508,18 @@ class ImageScannerORM:
         if not flags.get("dates_extracted", False) and image_record.dates:
             existing.dates = image_record.dates.model_dump(mode="json")
 
-        # Check for thumbnail - first check if file exists on disk
+        # Check for thumbnail on disk (may have been generated by background job)
         thumbnail_exists = False
         thumbnail_full_path = get_thumbnail_path(
             image_record.checksum,
             self.catalog_path / "thumbnails",
         )
         if thumbnail_full_path.exists():
-            # Thumbnail exists on disk, update DB if needed
             thumbnail_exists = True
             if not existing.thumbnail_path:
                 existing.thumbnail_path = str(
                     thumbnail_full_path.relative_to(self.catalog_path)
                 )
-        elif not flags.get("thumbnail_generated", False):
-            # No thumbnail on disk and not marked as generated, try to create
-            try:
-                if generate_thumbnail(file_path, thumbnail_full_path):
-                    existing.thumbnail_path = str(
-                        thumbnail_full_path.relative_to(self.catalog_path)
-                    )
-                    thumbnail_exists = True
-            except Exception as e:
-                logger.warning(f"Failed to generate thumbnail for {file_path}: {e}")
 
         # Update processing flags based on current state
         processing_flags = existing.processing_flags or {}
@@ -460,6 +547,13 @@ class ImageScannerORM:
         ]:
             if key not in processing_flags:
                 processing_flags[key] = flags.get(key, False)
+
+        # Populate queryable metadata columns if not already done
+        if not flags.get("metadata_columns_populated", False):
+            _populate_metadata_columns(
+                existing, image_record.dates, image_record.metadata
+            )
+            processing_flags["metadata_columns_populated"] = True
 
         existing.processing_flags = processing_flags
 
@@ -554,7 +648,9 @@ class ImageScanner:
     This allows existing code to work while we migrate to ORM.
     """
 
-    def __init__(self, catalog_db, workers: int = 4, perf_tracker=None):
+    def __init__(
+        self, catalog_db, workers: int = 4, perf_tracker=None, progress_callback=None
+    ):
         """
         Initialize scanner with CatalogDB instance.
 
@@ -562,10 +658,12 @@ class ImageScanner:
             catalog_db: CatalogDB instance
             workers: Number of parallel workers
             perf_tracker: Optional performance tracker
+            progress_callback: Optional callback(current, total, message) for progress updates
         """
         self.catalog = catalog_db
         self.workers = workers
         self.perf_tracker = perf_tracker
+        self.progress_callback = progress_callback
 
         # Create ORM scanner
         if hasattr(catalog_db, "session") and catalog_db.session:
@@ -585,6 +683,7 @@ class ImageScanner:
                 catalog_path=catalog_path,
                 workers=workers,
                 perf_tracker=perf_tracker,
+                progress_callback=progress_callback,
             )
         else:
             raise ValueError("CatalogDB must have an active session for ImageScanner")

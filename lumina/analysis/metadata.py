@@ -45,9 +45,52 @@ class MetadataExtractor:
         return self
 
     def __exit__(self, *args: Any) -> None:
-        """Context manager exit."""
+        """Context manager exit with robust cleanup for multiprocessing.
+
+        Ensures ExifTool subprocess is terminated even in multiprocessing workers.
+        This prevents orphaned subprocesses that cause pool.join() to hang.
+        """
         if self.exif_tool:
-            self.exif_tool.__exit__(*args)
+            try:
+                # First try normal cleanup
+                self.exif_tool.__exit__(*args)
+
+                # Verify subprocess terminated
+                if hasattr(self.exif_tool, "_process") and self.exif_tool._process:
+                    # Give it a moment to terminate cleanly
+                    import time
+
+                    for _ in range(10):  # Wait up to 1 second
+                        if self.exif_tool._process.poll() is not None:
+                            # Process terminated successfully
+                            break
+                        time.sleep(0.1)
+                    else:
+                        # Process still running after 1 second - force kill
+                        logger.warning(
+                            "ExifTool subprocess did not terminate cleanly, forcing kill"
+                        )
+                        try:
+                            self.exif_tool._process.kill()
+                            self.exif_tool._process.wait(timeout=2)
+                        except Exception as kill_error:
+                            logger.error(
+                                f"Failed to force-kill ExifTool subprocess: {kill_error}"
+                            )
+
+            except Exception as cleanup_error:
+                # Log but don't raise - we're in cleanup, must complete
+                logger.error(f"Error during MetadataExtractor cleanup: {cleanup_error}")
+
+                # Last resort: try to kill the subprocess directly
+                if hasattr(self.exif_tool, "_process") and self.exif_tool._process:
+                    try:
+                        self.exif_tool._process.kill()
+                    except Exception:
+                        pass  # Best effort
+            finally:
+                # Always clear the reference
+                self.exif_tool = None
 
     def extract_metadata(self, file_path: Path, file_type: FileType) -> ImageMetadata:
         """

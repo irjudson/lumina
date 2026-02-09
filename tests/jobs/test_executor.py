@@ -23,7 +23,7 @@ def test_executor_runs_job():
         process=process,
         finalize=finalize,
         batch_size=2,
-        max_workers=2,
+        max_workers=1,  # Sequential processing only
     )
 
     executor = JobExecutor(job)

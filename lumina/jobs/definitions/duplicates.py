@@ -157,6 +157,6 @@ duplicates_job: ParallelJob[str] = register_job(
         process=compute_image_hashes,
         finalize=finalize_duplicates,
         batch_size=1000,
-        max_workers=4,
+        max_workers=1,  # Ignored - sequential processing only
     )
 )

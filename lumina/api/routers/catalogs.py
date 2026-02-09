@@ -170,6 +170,69 @@ def update_catalog(
     return catalog
 
 
+@router.get("/{catalog_id}/browse-directories")
+def browse_directories(
+    catalog_id: uuid.UUID,
+    path: str = Query("/", description="Directory path to browse"),
+    db: Session = Depends(get_db),
+):
+    """List subdirectories at the given path for directory browsing.
+
+    Note: This allows browsing the entire filesystem visible to the container.
+    Users should only add directories they have mounted into the container.
+    """
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    try:
+        browse_path = Path(path).resolve()
+
+        if not browse_path.exists():
+            raise HTTPException(status_code=404, detail="Path does not exist")
+
+        if not browse_path.is_dir():
+            raise HTTPException(status_code=400, detail="Path is not a directory")
+
+        # List subdirectories
+        subdirs = []
+        try:
+            for item in sorted(browse_path.iterdir()):
+                if item.is_dir() and not item.name.startswith("."):
+                    try:
+                        subdirs.append(
+                            {
+                                "name": item.name,
+                                "path": str(item),
+                                "parent": str(browse_path),
+                            }
+                        )
+                    except (PermissionError, OSError):
+                        # Skip directories we can't access
+                        continue
+        except PermissionError:
+            raise HTTPException(
+                status_code=403, detail="Permission denied to read directory"
+            )
+
+        # Get parent directory (if not at root)
+        parent = None
+        if str(browse_path) != "/":
+            parent = str(browse_path.parent)
+
+        return {
+            "current_path": str(browse_path),
+            "parent": parent,
+            "directories": subdirs,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error browsing directories: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/{catalog_id}", status_code=204)
 def delete_catalog(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
     """Delete a catalog."""

@@ -117,16 +117,75 @@ def get_thumbnail(
     session: Session = Depends(get_db),
 ) -> FileResponse:
     """Get image thumbnail."""
+    from pathlib import Path
+
     repo = ImageRepository(session)
     image = repo.get(image_id)
     if not image:
         raise HTTPException(status_code=404, detail="Image not found")
 
+    # Generate thumbnail on-the-fly if not available
     if not image.thumbnail_path:
-        raise HTTPException(status_code=404, detail="Thumbnail not available")
+        # Try to generate from source image
+        source_path = Path(image.source_path)
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Source image not found")
+
+        # For now, serve the source image (thumbnail generation can be done via job)
+        # Determine media type
+        path_lower = str(source_path).lower()
+        if path_lower.endswith(".png"):
+            media_type = "image/png"
+        elif path_lower.endswith((".jpg", ".jpeg")):
+            media_type = "image/jpeg"
+        elif path_lower.endswith(".webp"):
+            media_type = "image/webp"
+        else:
+            media_type = "application/octet-stream"
+
+        return FileResponse(
+            source_path,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    # Construct absolute thumbnail path
+    # thumbnail_path is relative like "thumbnails/medium/checksum.jpg"
+    # Need to prepend catalog path
+    from ...db.models import Catalog
+
+    catalog = session.query(Catalog).filter(Catalog.id == image.catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    # Catalog base path is /app/catalogs/{catalog_id}
+    catalog_base = Path("/app/catalogs") / str(catalog.id)
+    thumbnail_full_path = catalog_base / image.thumbnail_path
+
+    if not thumbnail_full_path.exists():
+        # Thumbnail doesn't exist, serve source image as fallback
+        source_path = Path(image.source_path)
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Image file not found")
+
+        path_lower = str(source_path).lower()
+        if path_lower.endswith(".png"):
+            media_type = "image/png"
+        elif path_lower.endswith((".jpg", ".jpeg")):
+            media_type = "image/jpeg"
+        elif path_lower.endswith(".webp"):
+            media_type = "image/webp"
+        else:
+            media_type = "application/octet-stream"
+
+        return FileResponse(
+            source_path,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     return FileResponse(
-        image.thumbnail_path,
+        thumbnail_full_path,
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )

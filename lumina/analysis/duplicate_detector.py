@@ -131,7 +131,8 @@ class DuplicateDetector:
         ]
         self.use_gpu = use_gpu
         self.gpu_batch_size = gpu_batch_size
-        self.num_workers = num_workers if num_workers is not None else mp.cpu_count()
+        # Sequential mode by default (num_workers=1)
+        self.num_workers = num_workers if num_workers is not None else 1
 
         # Auto-detect FAISS availability if not explicitly set
         if use_faiss:

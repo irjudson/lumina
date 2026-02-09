@@ -61,8 +61,22 @@ class Job(Base):
         DateTime, nullable=True
     )  # When job completed (success or failure)
 
+    # Warehouse/priority fields
+    job_source: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="user", server_default="user"
+    )  # 'user' or 'warehouse'
+    priority: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=50, server_default="50"
+    )  # 0-100, higher = more urgent
+    scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True
+    )  # When warehouse scheduled this job
+    warehouse_trigger: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # What triggered warehouse job
+
     def __repr__(self) -> str:
-        return f"<Job(id={self.id}, type={self.job_type}, status={self.status})>"
+        return f"<Job(id={self.id}, type={self.job_type}, status={self.status}, priority={self.priority})>"
 
 
 class Catalog(Base):
@@ -135,6 +149,26 @@ class Image(Base):
 
     # Analysis results
     quality_score = Column(Integer)
+
+    # Queryable metadata columns (extracted from dates/metadata JSONB)
+    capture_time = Column(DateTime)
+    capture_time_source = Column(String(50))
+    date_confidence = Column(Integer)
+    camera_make = Column(String(255))
+    camera_model = Column(String(255))
+    lens_model = Column(String(255))
+    width = Column(Integer)
+    height = Column(Integer)
+    iso = Column(Integer)
+    aperture = Column(Float)
+    shutter_speed = Column(String(50))
+    focal_length = Column(Float)
+    latitude = Column(Float)
+    longitude = Column(Float)
+    gps_altitude = Column(Float)
+    orientation = Column(Integer)
+    format = Column(String(20))
+    metadata_extra = Column(JSONB)
 
     # Status (references lookup table)
     status_id = Column(
@@ -360,6 +394,34 @@ class Config(Base):
 
     def __repr__(self) -> str:
         return f"<Config(catalog={self.catalog_id}, key={self.key})>"
+
+
+class WarehouseConfig(Base):
+    """Warehouse automation configuration per catalog."""
+
+    __tablename__ = "warehouse_config"
+
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    task_type = Column(String, primary_key=True)
+    enabled = Column(Boolean, default=True, nullable=False)
+    check_interval_minutes = Column(Integer, default=60, nullable=False)
+    threshold = Column(JSONB, default={}, nullable=False)
+    last_run = Column(DateTime, nullable=True)
+    next_run = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    # Relationships
+    catalog = relationship("Catalog", backref="warehouse_config_entries")
+
+    def __repr__(self) -> str:
+        return f"<WarehouseConfig(catalog={self.catalog_id}, task={self.task_type}, enabled={self.enabled})>"
 
 
 class Statistics(Base):

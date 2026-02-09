@@ -99,3 +99,14 @@ SESSION_STATE.md
 # Test results
 test_results.txt
 *.output
+
+# Node.js and frontend
+node_modules/
+package-lock.json
+dist/
+.vite/
+*.tsbuildinfo
+
+# Frontend build output
+lumina/web/static/assets/
+src/

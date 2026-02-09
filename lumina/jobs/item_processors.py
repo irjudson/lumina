@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
-from ..analysis.scanner import _process_file_worker
+from ..analysis.metadata import MetadataExtractor
+from ..analysis.scanner import _process_file_sequential
 from ..db import CatalogDB as CatalogDatabase
 from ..shared.thumbnail_utils import generate_thumbnail, get_thumbnail_path
 from .coordinator import register_item_processor
@@ -75,7 +76,8 @@ def process_analyze_item(
             }
 
         # Process file (extract metadata, compute hashes)
-        result = _process_file_worker(file_path)
+        with MetadataExtractor() as extractor:
+            result = _process_file_sequential(file_path, extractor)
 
         if result is None:
             return {
