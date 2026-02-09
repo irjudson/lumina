@@ -185,10 +185,13 @@ def generate_thumbnails_job(ctx: JobContext) -> Dict[str, Any]:
             session = catalog_db.session
             assert session is not None
 
-            # Query Image ORM objects directly so we can update them
-            images = (
-                session.query(Image).filter(Image.catalog_id == ctx.catalog_id).all()
-            )
+            # Query only images that need thumbnails (unless force=True)
+            query = session.query(Image).filter(Image.catalog_id == ctx.catalog_id)
+            if not force:
+                query = query.filter(
+                    (Image.thumbnail_path.is_(None)) | (Image.thumbnail_path == "")
+                )
+            images = query.all()
 
             total_images = len(images)
             thumbnails_generated = 0
