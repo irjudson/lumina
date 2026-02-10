@@ -207,7 +207,7 @@ def browse_directories(
                                 "parent": str(browse_path),
                             }
                         )
-                    except (PermissionError, OSError):
+                    except OSError:
                         # Skip directories we can't access
                         continue
         except PermissionError:

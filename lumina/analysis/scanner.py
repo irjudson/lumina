@@ -194,13 +194,10 @@ class ImageScannerORM:
             directories: List of directories to scan
         """
         logger.info(f"Scanning {len(directories)} directories (sequential mode)")
-        print(f"DEBUG: scan_directories called with {directories}", flush=True)
         self.start_time = time.time()
 
         # Update catalog phase in config
-        print("DEBUG: About to call _update_config", flush=True)
         self._update_config("phase", CatalogPhase.ANALYZING.value)
-        print("DEBUG: _update_config completed", flush=True)
 
         # Track file collection
         ctx = (
@@ -568,24 +565,16 @@ class ImageScannerORM:
             key: Configuration key
             value: Configuration value
         """
-        print(f"DEBUG: _update_config called with key={key}, value={value}", flush=True)
-        print(
-            f"DEBUG: session={self.session}, catalog_id={self.catalog_id}", flush=True
-        )
-
         # Check if there's a failed transaction and rollback if needed
         if self.session.in_transaction() and not self.session.is_active:
-            print("DEBUG: Rolling back failed transaction", flush=True)
+            logger.debug("Rolling back failed transaction")
             self.session.rollback()
 
-        # SQLAlchemy's JSONB type handles Python objects automatically
-        # No need to json.dumps() - just pass the value directly
         config = (
             self.session.query(Config)
             .filter_by(catalog_id=self.catalog_id, key=key)
             .first()
         )
-        print(f"DEBUG: Query completed, config={config}", flush=True)
 
         if config:
             config.value = value
