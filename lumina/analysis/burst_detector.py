@@ -25,6 +25,9 @@ class ImageInfo:
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     geohash: Optional[str] = None
+    focal_length: Optional[float] = None
+    aperture: Optional[float] = None
+    iso: Optional[int] = None
 
     @property
     def camera_key(self) -> str:
@@ -107,8 +110,9 @@ class BurstDetector:
     2. Taken within gap_threshold_seconds of each other (< 1s)
     3. From the same location (GPS coordinates within tolerance)
     4. Sequential filenames (continuous numeric sequence)
-    5. At least min_burst_size images in the sequence
-    6. Total duration >= min_duration_seconds (filters identical timestamps)
+    5. Matching EXIF metadata (focal length, aperture, ISO)
+    6. At least min_burst_size images in the sequence
+    7. Total duration >= min_duration_seconds (filters identical timestamps)
     """
 
     def __init__(
@@ -214,6 +218,40 @@ class BurstDetector:
 
         return distance_m <= self.location_tolerance_meters
 
+    def _has_matching_metadata(self, img1: ImageInfo, img2: ImageInfo) -> bool:
+        """Check if two images have matching EXIF shooting metadata.
+
+        True bursts share the same focal length, aperture, and ISO because
+        the camera is in continuous shooting mode pointed at the same scene.
+        Images with different settings indicate the photographer changed
+        framing/exposure between shots — not a burst.
+
+        If metadata is missing from either image, allow the match (can't disprove).
+
+        Args:
+            img1: First image
+            img2: Second image
+
+        Returns:
+            True if metadata matches or is unavailable
+        """
+        # Focal length: must match exactly (lens didn't zoom between burst frames)
+        if img1.focal_length is not None and img2.focal_length is not None:
+            if img1.focal_length != img2.focal_length:
+                return False
+
+        # Aperture: must match exactly (no aperture change during burst)
+        if img1.aperture is not None and img2.aperture is not None:
+            if img1.aperture != img2.aperture:
+                return False
+
+        # ISO: must match exactly (auto-ISO can shift but rarely during a true burst)
+        if img1.iso is not None and img2.iso is not None:
+            if img1.iso != img2.iso:
+                return False
+
+        return True
+
     def _is_sequential_filename(self, img1: ImageInfo, img2: ImageInfo) -> bool:
         """Check if two images have sequential filenames.
 
@@ -263,6 +301,7 @@ class BurstDetector:
         2. Time gap < threshold
         3. Same location (GPS)
         4. Sequential filenames
+        5. Matching EXIF metadata (focal length, aperture, ISO)
 
         Args:
             sorted_images: Images sorted by timestamp, all from same camera
@@ -284,12 +323,14 @@ class BurstDetector:
             time_gap = (current_img.timestamp - prev_img.timestamp).total_seconds()
             same_location = self._is_same_location(prev_img, current_img)
             sequential_files = self._is_sequential_filename(prev_img, current_img)
+            matching_metadata = self._has_matching_metadata(prev_img, current_img)
 
             # All criteria must be met
             if (
                 time_gap <= self.gap_threshold_seconds
                 and same_location
                 and sequential_files
+                and matching_metadata
             ):
                 # Continue current sequence
                 current_sequence.append(current_img)

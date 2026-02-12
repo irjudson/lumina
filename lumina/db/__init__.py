@@ -5,6 +5,8 @@ from .connection import get_db, get_db_context, init_db
 from .models import (
     Base,
     Catalog,
+    Collection,
+    CollectionImage,
     Config,
     DuplicateGroup,
     DuplicateMember,
@@ -22,6 +24,8 @@ __all__ = [
     "init_db",
     "Base",
     "Catalog",
+    "Collection",
+    "CollectionImage",
     "Config",
     "DuplicateGroup",
     "DuplicateMember",

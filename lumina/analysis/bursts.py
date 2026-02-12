@@ -58,6 +58,27 @@ def detect_bursts(
     return all_bursts
 
 
+def _metadata_matches(img1: Dict[str, Any], img2: Dict[str, Any]) -> bool:
+    """Check if two images have matching EXIF shooting metadata.
+
+    True bursts share the same focal length, aperture, and ISO.
+    If metadata is missing from either image, allow the match.
+    """
+    fl1, fl2 = img1.get("focal_length"), img2.get("focal_length")
+    if fl1 is not None and fl2 is not None and fl1 != fl2:
+        return False
+
+    ap1, ap2 = img1.get("aperture"), img2.get("aperture")
+    if ap1 is not None and ap2 is not None and ap1 != ap2:
+        return False
+
+    iso1, iso2 = img1.get("iso"), img2.get("iso")
+    if iso1 is not None and iso2 is not None and iso1 != iso2:
+        return False
+
+    return True
+
+
 def _find_sequences(
     sorted_images: List[Dict[str, Any]],
     gap_threshold: float,
@@ -83,7 +104,7 @@ def _find_sequences(
         else:
             gap = float("inf")
 
-        if gap <= gap_threshold:
+        if gap <= gap_threshold and _metadata_matches(prev_img, curr_img):
             current.append(curr_img)
         else:
             # End of sequence - check if it's a valid burst

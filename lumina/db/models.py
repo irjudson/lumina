@@ -424,6 +424,69 @@ class WarehouseConfig(Base):
         return f"<WarehouseConfig(catalog={self.catalog_id}, task={self.task_type}, enabled={self.enabled})>"
 
 
+class Collection(Base):
+    """User-created collections (albums) of images."""
+
+    __tablename__ = "collections"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    cover_image_id = Column(
+        String, ForeignKey("images.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    # Relationships
+    catalog = relationship("Catalog", backref="collections")
+    cover_image = relationship("Image", foreign_keys=[cover_image_id])
+    collection_images = relationship(
+        "CollectionImage", back_populates="collection", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<Collection(id={self.id}, name={self.name})>"
+
+
+class CollectionImage(Base):
+    """Many-to-many relationship between collections and images."""
+
+    __tablename__ = "collection_images"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    collection_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("collections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    image_id = Column(
+        String, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    position = Column(Integer, default=0)
+    added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    collection = relationship("Collection", back_populates="collection_images")
+    image = relationship("Image")
+
+    __table_args__ = (
+        UniqueConstraint("collection_id", "image_id", name="unique_collection_image"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<CollectionImage(collection={self.collection_id}, image={self.image_id})>"
+        )
+
+
 class Statistics(Base):
     """Per-catalog statistics tracking."""
 

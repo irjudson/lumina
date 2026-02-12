@@ -452,6 +452,7 @@ def list_catalog_images(
             dates,
             metadata,
             thumbnail_path,
+            status_id,
             created_at,
             updated_at
         FROM images
@@ -467,6 +468,10 @@ def list_catalog_images(
     image_ids = []
     for row in result:
         row_dict = dict(row._mapping)
+        # Map database status_id to frontend-friendly status
+        status_id = row_dict.get("status_id", "active")
+        status = "ok" if status_id == "active" else status_id
+
         image_data = {
             "id": row_dict["id"],
             "source_path": row_dict["source_path"],
@@ -476,6 +481,7 @@ def list_catalog_images(
             "dates": row_dict["dates"],
             "metadata": row_dict["metadata"],
             "thumbnail_path": row_dict["thumbnail_path"],
+            "status": status,
             "created_at": (
                 row_dict["created_at"].isoformat() if row_dict["created_at"] else None
             ),

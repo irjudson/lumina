@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..db import get_db, init_db
 from ..db.models import Catalog
-from .routers import catalogs, images
+from .routers import catalogs, collections
 from .routers import jobs_new as jobs
 from .routers import warehouse
 
@@ -172,8 +172,8 @@ def create_app() -> FastAPI:
             if request.url.path.startswith("/api/"):
                 path = request.url.path
                 # Remove trailing slashes EXCEPT for router base paths
-                # Router base paths: /api/catalogs/, /api/jobs/, /api/images/
-                router_bases = ["/api/catalogs/", "/api/jobs/", "/api/images/"]
+                # Router base paths: /api/catalogs/, /api/jobs/
+                router_bases = ["/api/catalogs/", "/api/jobs/"]
 
                 if path.endswith("/") and path not in router_bases:
                     # Check if this is a deeper path that should have slash removed
@@ -221,9 +221,9 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
+    app.include_router(collections.router, prefix="/api/catalogs", tags=["collections"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
     app.include_router(warehouse.router, prefix="/api/warehouse", tags=["warehouse"])
-    app.include_router(images.router, prefix="/api", tags=["images"])
 
     # Health check endpoint
     @app.get("/health")

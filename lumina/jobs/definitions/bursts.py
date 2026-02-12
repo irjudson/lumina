@@ -44,6 +44,9 @@ def discover_images_for_bursts(
                 "timestamp": img.capture_time,
                 "camera": img.camera_model or "unknown",
                 "quality_score": img.quality_score,
+                "focal_length": img.focal_length,
+                "aperture": img.aperture,
+                "iso": img.iso,
             }
             for img in images
         ]
