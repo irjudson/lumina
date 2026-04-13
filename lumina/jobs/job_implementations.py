@@ -968,6 +968,9 @@ def extract_metadata_columns_job(ctx: JobContext) -> Dict[str, Any]:
                 "gps_altitude": "gps_altitude",
                 "orientation": "orientation",
                 "format": "format",
+                "perceptual_hash_dhash": "dhash",
+                "perceptual_hash_ahash": "ahash",
+                "perceptual_hash_whash": "whash",
             }
 
             # Keys that are expected in metadata JSONB but not mapped to columns
@@ -979,9 +982,6 @@ def extract_metadata_columns_job(ctx: JobContext) -> Dict[str, Any]:
                 "flash",
                 "artist",
                 "copyright",
-                "perceptual_hash_dhash",
-                "perceptual_hash_ahash",
-                "perceptual_hash_whash",
                 "merged_from",
             }
 
