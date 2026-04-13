@@ -275,6 +275,9 @@ def list_catalog_images(
     date_to: str = None,  # ISO date string
     min_width: int = None,
     min_height: int = None,
+    # Import date filters (when the file was added to the catalog)
+    created_at_from: str = None,
+    created_at_to: str = None,
     # Tag filters
     tags: str = Query(None, description="Comma-separated tag names to filter by"),
     tag_match: str = Query(
@@ -386,6 +389,15 @@ def list_catalog_images(
     if min_height:
         conditions.append("(metadata->>'height')::int >= :min_height")
         params["min_height"] = min_height
+
+    # Import-date (created_at) filters
+    if created_at_from:
+        conditions.append("created_at >= :created_at_from::timestamp")
+        params["created_at_from"] = created_at_from
+
+    if created_at_to:
+        conditions.append("created_at <= :created_at_to::timestamp")
+        params["created_at_to"] = created_at_to
 
     # Tag filters
     if has_tags is True:
@@ -1545,6 +1557,89 @@ def get_images_in_cluster(
         "total": total,
         "offset": offset,
         "limit": limit,
+    }
+
+
+# =============================================================================
+# Smart View Counts
+# =============================================================================
+
+
+@router.get("/{catalog_id}/smart-counts")
+def get_smart_counts(
+    catalog_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Return sidebar badge counts for all smart views in a single DB round-trip.
+
+    Counts:
+    - recent:     images added to this catalog in the last 30 days
+    - untagged:   images with no entries in image_tags
+    - videos:     images where file_type = 'video'
+    - geotagged:  images with non-zero GPS latitude
+    - bursts:     number of burst groups
+    - duplicates: number of duplicate groups
+    """
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    catalog_id_str = str(catalog_id)
+
+    query = text(
+        """
+        WITH image_counts AS (
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE i.created_at >= NOW() - INTERVAL '30 days'
+                ) AS recent,
+                COUNT(*) FILTER (
+                    WHERE i.file_type = 'video'
+                ) AS videos,
+                COUNT(*) FILTER (
+                    WHERE i.metadata->>'gps_latitude' IS NOT NULL
+                      AND (i.metadata->>'gps_latitude')::float != 0
+                ) AS geotagged,
+                COUNT(*) FILTER (
+                    WHERE tag_count.cnt IS NULL OR tag_count.cnt = 0
+                ) AS untagged
+            FROM images i
+            LEFT JOIN (
+                SELECT image_id, COUNT(*) AS cnt
+                FROM image_tags
+                GROUP BY image_id
+            ) tag_count ON tag_count.image_id = i.id
+            WHERE i.catalog_id = :catalog_id
+        ),
+        burst_count AS (
+            SELECT COUNT(*) AS cnt FROM bursts WHERE catalog_id = :catalog_id
+        ),
+        duplicate_count AS (
+            SELECT COUNT(DISTINCT id) AS cnt
+            FROM duplicate_groups
+            WHERE catalog_id = :catalog_id
+        )
+        SELECT
+            ic.recent,
+            ic.videos,
+            ic.geotagged,
+            ic.untagged,
+            bc.cnt  AS bursts,
+            dc.cnt  AS duplicates
+        FROM image_counts ic, burst_count bc, duplicate_count dc
+        """
+    )
+
+    row = db.execute(query, {"catalog_id": catalog_id_str}).fetchone()
+
+    return {
+        "recent": int(row.recent) if row and row.recent is not None else 0,
+        "untagged": int(row.untagged) if row and row.untagged is not None else 0,
+        "videos": int(row.videos) if row and row.videos is not None else 0,
+        "geotagged": int(row.geotagged) if row and row.geotagged is not None else 0,
+        "bursts": int(row.bursts) if row and row.bursts is not None else 0,
+        "duplicates": int(row.duplicates) if row and row.duplicates is not None else 0,
     }
 
 
