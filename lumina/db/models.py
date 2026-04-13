@@ -141,6 +141,8 @@ class Image(Base):
     dhash = Column(Text)
     ahash = Column(Text)
     whash = Column(Text)  # Wavelet hash - most robust to transformations
+    dhash_16 = Column(Text)  # 256-bit hash for L4 preview detection (scale > 0.5)
+    dhash_32 = Column(Text)  # 1024-bit hash for L4 preview detection (scale > 0.25)
 
     # Geohash columns for spatial queries (populated for images with GPS)
     geohash_4 = Column(String(4))  # ~39km precision (country view)
@@ -575,3 +577,123 @@ class PerformanceSnapshot(Base):
 
     def __repr__(self) -> str:
         return f"<PerformanceSnapshot(id={self.id}, phase={self.phase}, timestamp={self.timestamp})>"
+
+
+class DuplicateCandidate(Base):
+    """Raw output of the duplicate detection pipeline — one row per pair per layer."""
+
+    __tablename__ = "duplicate_candidates"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    image_id_a = Column(
+        Text, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    image_id_b = Column(
+        Text, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    layer = Column(String(50), nullable=False)
+    confidence = Column(Float, nullable=False)
+    verify_carefully = Column(Boolean, default=False, nullable=False)
+    verify_reason = Column(Text)
+    detection_meta = Column(JSONB, nullable=False, default={})
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    reviewed_at = Column(DateTime)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "image_id_a", "image_id_b", "layer", name="uq_candidate_pair_layer"
+        ),
+    )
+
+
+class DuplicateDecision(Base):
+    """Immutable audit log of every user decision on a duplicate candidate."""
+
+    __tablename__ = "duplicate_decisions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    candidate_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duplicate_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    decision = Column(String(50), nullable=False)
+    primary_id = Column(Text, ForeignKey("images.id", ondelete="SET NULL"))
+    decided_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    notes = Column(Text)
+
+
+class ArchivedImage(Base):
+    """Full copy of an images row at archive time, with provenance chain."""
+
+    __tablename__ = "archived_images"
+
+    id = Column(Text, primary_key=True)
+    catalog_id = Column(UUID(as_uuid=True), nullable=False)
+    source_path = Column(Text, nullable=False)
+    file_type = Column(String, nullable=False)
+    checksum = Column(Text, nullable=False)
+    size_bytes = Column(BigInteger)
+    dates = Column(JSONB, nullable=False, default={})
+    metadata_json = Column("metadata", JSONB, nullable=False, default={})
+    thumbnail_path = Column(Text)
+    dhash = Column(Text)
+    ahash = Column(Text)
+    whash = Column(Text)
+    dhash_16 = Column(Text)
+    dhash_32 = Column(Text)
+    quality_score = Column(Integer)
+    capture_time = Column(DateTime)
+    camera_make = Column(String(255))
+    camera_model = Column(String(255))
+    width = Column(Integer)
+    height = Column(Integer)
+    format = Column(String(20))
+    latitude = Column(Float)
+    longitude = Column(Float)
+    processing_flags = Column(JSONB, nullable=False, default={})
+    created_at = Column(DateTime)
+    archived_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    archive_reason = Column(String(50), nullable=False)
+    decision_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("duplicate_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    primary_image_id = Column(Text, nullable=False)
+    original_catalog_id = Column(UUID(as_uuid=True), nullable=False)
+    restoration_path = Column(Text)
+
+
+class DetectionThreshold(Base):
+    """Per-catalog per-layer learning state for threshold adaptation."""
+
+    __tablename__ = "detection_thresholds"
+
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    layer = Column(String(50), primary_key=True)
+    threshold = Column(Float, nullable=False)
+    confirmed_count = Column(Integer, default=0, nullable=False)
+    rejected_count = Column(Integer, default=0, nullable=False)
+    last_run_threshold = Column(Float)
+    last_updated = Column(DateTime, default=datetime.utcnow)
+
+
+class SuppressionPair(Base):
+    """Permanent do-not-resurface index for reviewed pairs."""
+
+    __tablename__ = "suppression_pairs"
+
+    id_a = Column(Text, primary_key=True)
+    id_b = Column(Text, primary_key=True)
+    decision = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
