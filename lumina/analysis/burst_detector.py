@@ -28,6 +28,7 @@ class ImageInfo:
     focal_length: Optional[float] = None
     aperture: Optional[float] = None
     iso: Optional[int] = None
+    dhash: Optional[str] = None
 
     @property
     def camera_key(self) -> str:
@@ -121,6 +122,7 @@ class BurstDetector:
         min_burst_size: int = 3,
         location_tolerance_meters: float = 10.0,
         min_duration_seconds: float = 0.5,
+        visual_similarity_threshold: int = 15,
     ):
         """Initialize burst detector.
 
@@ -130,11 +132,15 @@ class BurstDetector:
             location_tolerance_meters: Maximum distance between GPS coords (default 10m)
             min_duration_seconds: Minimum total duration for valid burst (default 0.5s)
                                  Filters out groups with identical timestamps
+            visual_similarity_threshold: Max Hamming distance between dhash values
+                                        (default 15; images with distance > threshold
+                                        are visually different and not a burst)
         """
         self.gap_threshold_seconds = gap_threshold_seconds
         self.min_burst_size = min_burst_size
         self.location_tolerance_meters = location_tolerance_meters
         self.min_duration_seconds = min_duration_seconds
+        self.visual_similarity_threshold = visual_similarity_threshold
 
     def detect_bursts(self, images: List[ImageInfo]) -> List[BurstGroup]:
         """Detect burst sequences in a list of images.
@@ -252,6 +258,33 @@ class BurstDetector:
 
         return True
 
+    def _is_visually_similar(self, img1: ImageInfo, img2: ImageInfo) -> bool:
+        """Check if two images are visually similar using perceptual hashing.
+
+        Computes the Hamming distance between dhash values. Images with distance
+        greater than visual_similarity_threshold are from different scenes and
+        should not be grouped as a burst.
+
+        If either image lacks a dhash, the check is skipped (allow the match).
+
+        Args:
+            img1: First image
+            img2: Second image
+
+        Returns:
+            True if visually similar or if dhash unavailable
+        """
+        if img1.dhash is None or img2.dhash is None:
+            return True
+
+        try:
+            from lumina.analysis.perceptual_hash import hamming_distance
+
+            distance = hamming_distance(img1.dhash, img2.dhash)
+            return distance <= self.visual_similarity_threshold
+        except Exception:
+            return True  # Can't compute — allow it
+
     def _is_sequential_filename(self, img1: ImageInfo, img2: ImageInfo) -> bool:
         """Check if two images have sequential filenames.
 
@@ -324,6 +357,7 @@ class BurstDetector:
             same_location = self._is_same_location(prev_img, current_img)
             sequential_files = self._is_sequential_filename(prev_img, current_img)
             matching_metadata = self._has_matching_metadata(prev_img, current_img)
+            visually_similar = self._is_visually_similar(prev_img, current_img)
 
             # All criteria must be met
             if (
@@ -331,6 +365,7 @@ class BurstDetector:
                 and same_location
                 and sequential_files
                 and matching_metadata
+                and visually_similar
             ):
                 # Continue current sequence
                 current_sequence.append(current_img)

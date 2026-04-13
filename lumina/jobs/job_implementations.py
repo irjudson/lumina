@@ -352,7 +352,8 @@ def detect_bursts_job(ctx: JobContext) -> Dict[str, Any]:
                     """
                     SELECT id, capture_time, camera_make, camera_model,
                            quality_score, source_path, latitude, longitude,
-                           COALESCE(geohash_6, '') as geohash
+                           COALESCE(geohash_6, '') as geohash,
+                           focal_length, aperture, iso, dhash
                     FROM images
                     WHERE catalog_id = :catalog_id
                     AND capture_time IS NOT NULL
@@ -373,6 +374,10 @@ def detect_bursts_job(ctx: JobContext) -> Dict[str, Any]:
                     latitude=row[6],
                     longitude=row[7],
                     geohash=row[8],
+                    focal_length=row[9],
+                    aperture=row[10],
+                    iso=row[11],
+                    dhash=row[12],
                 )
                 for row in result.fetchall()
             ]
