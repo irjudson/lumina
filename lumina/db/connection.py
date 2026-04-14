@@ -66,6 +66,12 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created")
 
+    # Run dedup schema migration (idempotent — safe to call every startup)
+    from .migrations.dedup_schema import upgrade
+
+    upgrade(engine)
+    logger.info("Dedup schema migration applied")
+
     # Populate reference tables
     db = SessionLocal()
     try:
