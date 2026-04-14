@@ -155,6 +155,27 @@ def compute_all_hashes(
     }
 
 
+def compute_all_hashes_v2(
+    image_path: Union[Path, str],
+) -> Dict[str, str]:
+    """Compute multi-resolution dhash for the deduplication pipeline.
+
+    Returns dhash at three sizes:
+    - dhash_8:  64-bit  (for L5 near-duplicate — 16 hex chars)
+    - dhash_16: 256-bit (for L4 preview, scale > 0.5 — 64 hex chars)
+    - dhash_32: 1024-bit (for L4 preview, scale > 0.25 — 256 hex chars)
+
+    Also returns ahash and whash at size 8 for backwards compatibility.
+    """
+    return {
+        "dhash_8": compute_dhash(image_path, hash_size=8),
+        "dhash_16": compute_dhash(image_path, hash_size=16),
+        "dhash_32": compute_dhash(image_path, hash_size=32),
+        "ahash": compute_ahash(image_path, hash_size=8),
+        "whash": compute_whash(image_path, hash_size=8),
+    }
+
+
 def similarity_score(hash1: str, hash2: str, hash_bits: int = 64) -> int:
     """Compute similarity percentage between two hashes.
 

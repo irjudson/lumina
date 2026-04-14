@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict
 from ..analysis.scanner import ImageScanner
 from ..db import CatalogDB as CatalogDatabase
 from .background_jobs import should_stop_job, update_job_status
+from .definitions import hash_v2  # noqa: F401  - registers hash_images_v2 job
 from .types import JobContext
 
 logger = logging.getLogger(__name__)
@@ -1237,6 +1238,26 @@ def test_job(ctx: JobContext) -> Dict[str, Any]:
     }
 
 
+def _run_framework_job(ctx: "JobContext", job_name: str) -> Dict[str, Any]:
+    """Run a framework-registered job (ParallelJob) via the global REGISTRY.
+
+    Args:
+        ctx: The job context (provides job_id and catalog_id)
+        job_name: Name of the registered ParallelJob to execute
+
+    Returns:
+        Result dict from the job's finalize function (or executor summary)
+    """
+    from .framework import REGISTRY, JobExecutor
+
+    job = REGISTRY.get(job_name)
+    if job is None:
+        raise ValueError(f"No framework job registered under name '{job_name}'")
+
+    executor = JobExecutor(job)
+    return executor.run(ctx.job_id, ctx.catalog_id)
+
+
 # Job registry
 JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "scan": scan_analyze_job,
@@ -1247,4 +1268,5 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "auto_tag": auto_tag_job,
     "extract_metadata_columns": extract_metadata_columns_job,
     "test": test_job,  # Test job for verification
+    "hash_images_v2": lambda ctx: _run_framework_job(ctx, "hash_images_v2"),
 }

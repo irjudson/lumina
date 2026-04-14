@@ -95,3 +95,24 @@ def test_compute_all_hashes(sample_image):
     assert "ahash" in hashes
     assert "whash" in hashes
     assert all(len(h) == 16 for h in hashes.values())
+
+
+def test_compute_all_hashes_v2_returns_multi_res(shared_test_images):
+    from lumina.analysis.hashing import compute_all_hashes_v2
+
+    result = compute_all_hashes_v2(shared_test_images / "red.jpg")
+    assert "dhash_8" in result
+    assert "dhash_16" in result
+    assert "dhash_32" in result
+    assert len(result["dhash_8"]) == 16  # 64-bit = 16 hex chars
+    assert len(result["dhash_16"]) == 64  # 256-bit = 64 hex chars
+    assert len(result["dhash_32"]) == 256  # 1024-bit = 256 hex chars
+
+
+def test_dhash_multi_res_different_lengths(shared_test_images):
+    from lumina.analysis.hashing import compute_all_hashes_v2
+
+    result = compute_all_hashes_v2(shared_test_images / "gradient1.jpg")
+    # All three must be different lengths
+    assert len(result["dhash_8"]) != len(result["dhash_16"])
+    assert len(result["dhash_16"]) != len(result["dhash_32"])
