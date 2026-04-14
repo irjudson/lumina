@@ -59,6 +59,12 @@ def test_l1_exact_finds_checksum_duplicates():
     assert pairs[0].layer == "exact"
     assert pairs[0].confidence == 1.0
     assert {pairs[0].image_id_a, pairs[0].image_id_b} == {"img-1", "img-2"}
+    meta = pairs[0].detection_meta
+    assert "checksum" in meta
+    assert "path_a" in meta
+    assert "path_b" in meta
+    # path_a should correspond to image_id_a (the lex-smaller ID)
+    assert meta["path_a"] != meta["path_b"]
 
 
 def test_l1_exact_no_duplicates():
@@ -143,7 +149,7 @@ def test_l2_reimport_detection_meta_has_timestamps():
     pairs = list(detect_reimport(images))
     assert len(pairs) == 1
     meta = pairs[0].detection_meta
-    assert "created_at_a" in meta or "created_at_b" in meta
+    assert "created_at_a" in meta and "created_at_b" in meta
 
 
 def test_pipeline_filter_suppressed():
@@ -170,3 +176,31 @@ def test_pipeline_filter_suppressed():
     result = list(filter_suppressed(iter(candidates), suppressed))
     assert len(result) == 1
     assert result[0].image_id_a == "ccc"
+
+
+def test_l1_exact_detection_meta_labels_match_canonical_ids():
+    """path_a in detection_meta must correspond to image_id_a (lex-smaller)."""
+    from lumina.analysis.dedup.layers.l1_exact import detect_exact
+
+    images = [
+        {
+            "id": "zzz",
+            "checksum": "same",
+            "source_path": "/zzz.jpg",
+            "created_at": None,
+        },
+        {
+            "id": "aaa",
+            "checksum": "same",
+            "source_path": "/aaa.jpg",
+            "created_at": None,
+        },
+    ]
+    pairs = list(detect_exact(images))
+    assert len(pairs) == 1
+    p = pairs[0]
+    assert p.image_id_a == "aaa"  # lex-smaller
+    assert p.image_id_b == "zzz"
+    # path_a must correspond to image_id_a
+    assert p.detection_meta["path_a"] == "/aaa.jpg"
+    assert p.detection_meta["path_b"] == "/zzz.jpg"
