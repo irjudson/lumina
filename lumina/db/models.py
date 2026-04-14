@@ -9,6 +9,7 @@ from sqlalchemy import (
     ARRAY,
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -22,6 +23,9 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
 
 Base = declarative_base()
+
+VALID_LAYERS = {"exact", "reimport", "format_variant", "preview", "near_duplicate"}
+VALID_DECISIONS = {"confirmed_duplicate", "not_duplicate", "deferred"}
 
 
 class Job(Base):
@@ -591,16 +595,16 @@ class DuplicateCandidate(Base):
         nullable=False,
     )
     image_id_a = Column(
-        Text, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+        String, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
     )
     image_id_b = Column(
-        Text, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+        String, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
     )
     layer = Column(String(50), nullable=False)
     confidence = Column(Float, nullable=False)
     verify_carefully = Column(Boolean, default=False, nullable=False)
     verify_reason = Column(Text)
-    detection_meta = Column(JSONB, nullable=False, default={})
+    detection_meta = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     reviewed_at = Column(DateTime)
 
@@ -608,7 +612,15 @@ class DuplicateCandidate(Base):
         UniqueConstraint(
             "image_id_a", "image_id_b", "layer", name="uq_candidate_pair_layer"
         ),
+        CheckConstraint("image_id_a < image_id_b", name="ck_candidate_pair_ordered"),
+        CheckConstraint(
+            "layer IN ('exact','reimport','format_variant','preview','near_duplicate')",
+            name="ck_candidate_layer",
+        ),
     )
+
+    def __repr__(self) -> str:
+        return f"<DuplicateCandidate(id={self.id}, layer={self.layer}, confidence={self.confidence})>"
 
 
 class DuplicateDecision(Base):
@@ -623,9 +635,19 @@ class DuplicateDecision(Base):
         nullable=False,
     )
     decision = Column(String(50), nullable=False)
-    primary_id = Column(Text, ForeignKey("images.id", ondelete="SET NULL"))
+    primary_id = Column(String, ForeignKey("images.id", ondelete="SET NULL"))
     decided_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     notes = Column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('confirmed_duplicate','not_duplicate','deferred')",
+            name="ck_decision_value",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<DuplicateDecision(id={self.id}, decision={self.decision}, candidate_id={self.candidate_id})>"
 
 
 class ArchivedImage(Base):
@@ -634,13 +656,19 @@ class ArchivedImage(Base):
     __tablename__ = "archived_images"
 
     id = Column(Text, primary_key=True)
-    catalog_id = Column(UUID(as_uuid=True), nullable=False)
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     source_path = Column(Text, nullable=False)
     file_type = Column(String, nullable=False)
     checksum = Column(Text, nullable=False)
     size_bytes = Column(BigInteger)
-    dates = Column(JSONB, nullable=False, default={})
-    metadata_json = Column("metadata", JSONB, nullable=False, default={})
+    dates = Column(JSONB, nullable=False, default=dict, server_default="{}")
+    metadata_json = Column(
+        "metadata", JSONB, nullable=False, default=dict, server_default="{}"
+    )
     thumbnail_path = Column(Text)
     dhash = Column(Text)
     ahash = Column(Text)
@@ -656,7 +684,7 @@ class ArchivedImage(Base):
     format = Column(String(20))
     latitude = Column(Float)
     longitude = Column(Float)
-    processing_flags = Column(JSONB, nullable=False, default={})
+    processing_flags = Column(JSONB, nullable=False, default=dict, server_default="{}")
     created_at = Column(DateTime)
     archived_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     archive_reason = Column(String(50), nullable=False)
@@ -665,9 +693,13 @@ class ArchivedImage(Base):
         ForeignKey("duplicate_decisions.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    # No FK — primary image may be deleted; provenance preserved here
     primary_image_id = Column(Text, nullable=False)
     original_catalog_id = Column(UUID(as_uuid=True), nullable=False)
     restoration_path = Column(Text)
+
+    def __repr__(self) -> str:
+        return f"<ArchivedImage(id={self.id}, archive_reason={self.archive_reason}, archived_at={self.archived_at})>"
 
 
 class DetectionThreshold(Base):
@@ -685,7 +717,10 @@ class DetectionThreshold(Base):
     confirmed_count = Column(Integer, default=0, nullable=False)
     rejected_count = Column(Integer, default=0, nullable=False)
     last_run_threshold = Column(Float)
-    last_updated = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def __repr__(self) -> str:
+        return f"<DetectionThreshold(catalog_id={self.catalog_id}, layer={self.layer}, threshold={self.threshold})>"
 
 
 class SuppressionPair(Base):
@@ -697,3 +732,10 @@ class SuppressionPair(Base):
     id_b = Column(Text, primary_key=True)
     decision = Column(String(50), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("id_a < id_b", name="ck_suppression_pair_ordered"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SuppressionPair(id_a={self.id_a}, id_b={self.id_b}, decision={self.decision})>"
