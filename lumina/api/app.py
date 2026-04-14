@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..db import get_db, init_db
 from ..db.models import Catalog
-from .routers import catalogs, collections
+from .routers import catalogs, collections, duplicates
 from .routers import jobs_new as jobs
 from .routers import warehouse
 
@@ -220,6 +220,8 @@ def create_app() -> FastAPI:
         logger.info("Shutdown complete")
 
     # Include routers
+    # duplicates router must be registered before catalogs to take precedence on overlapping paths
+    app.include_router(duplicates.router, prefix="/api/catalogs", tags=["duplicates"])
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
     app.include_router(collections.router, prefix="/api/catalogs", tags=["collections"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
