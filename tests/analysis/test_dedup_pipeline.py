@@ -483,3 +483,35 @@ def test_l4_preview_detects_large_scale_image(tmp_path):
     assert len(pairs) == 1
     assert pairs[0].layer == "preview"
     assert pairs[0].detection_meta["hash_bits"] == 256
+
+
+def test_bktree_finds_neighbors_within_distance():
+    from lumina.analysis.dedup.bktree import BKTree
+    from lumina.analysis.hashing import hamming_distance
+
+    items = [
+        ("a", "0000000000000000"),
+        ("b", "0000000000000001"),
+        ("c", "ffffffffffffffff"),
+    ]
+    tree = BKTree(hamming_distance, items)
+    results = tree.find("0000000000000000", 2)
+    ids = {r[0] for r in results}
+    assert "a" in ids
+    assert "b" in ids
+    assert "c" not in ids
+
+
+def test_l5_near_duplicate_finds_similar():
+    from lumina.analysis.dedup.layers.l5_near_duplicate import detect_near_duplicates
+
+    images = [
+        {"id": "img-1", "dhash": "0000000000000000"},
+        {"id": "img-2", "dhash": "0000000000000001"},  # 1 bit diff
+        {"id": "img-3", "dhash": "ffffffffffffffff"},  # totally different
+    ]
+    pairs = list(detect_near_duplicates(images, threshold=4))
+    assert len(pairs) == 1
+    assert pairs[0].layer == "near_duplicate"
+    ids = {pairs[0].image_id_a, pairs[0].image_id_b}
+    assert ids == {"img-1", "img-2"}
