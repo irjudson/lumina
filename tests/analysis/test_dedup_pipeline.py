@@ -515,3 +515,31 @@ def test_l5_near_duplicate_finds_similar():
     assert pairs[0].layer == "near_duplicate"
     ids = {pairs[0].image_id_a, pairs[0].image_id_b}
     assert ids == {"img-1", "img-2"}
+
+
+def test_bktree_boundary_is_inclusive():
+    """Items at exactly max_distance should be included in find results."""
+    from lumina.analysis.dedup.bktree import BKTree
+    from lumina.analysis.hashing import hamming_distance
+
+    # "0000000000000003" differs from "0000000000000000" by exactly 2 bits
+    items = [("a", "0000000000000000"), ("b", "0000000000000003")]
+    tree = BKTree(hamming_distance, items)
+    results = tree.find("0000000000000000", 2)  # max_distance == actual distance
+    ids = {r[0] for r in results}
+    assert "b" in ids  # boundary is inclusive
+
+
+def test_l5_skips_images_without_dhash():
+    """Images missing a dhash field are silently excluded from the BK-tree."""
+    from lumina.analysis.dedup.layers.l5_near_duplicate import detect_near_duplicates
+
+    images = [
+        {"id": "img-1", "dhash": "0000000000000000"},
+        {"id": "img-2", "dhash": None},  # no hash — should be skipped
+        {"id": "img-3", "dhash": "0000000000000001"},  # 1 bit from img-1
+    ]
+    pairs = list(detect_near_duplicates(images, threshold=4))
+    pair_ids = [{p.image_id_a, p.image_id_b} for p in pairs]
+    assert {"img-1", "img-3"} in pair_ids
+    assert not any("img-2" in s for s in pair_ids)

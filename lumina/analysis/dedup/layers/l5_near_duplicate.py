@@ -1,6 +1,6 @@
 """L5: Near-duplicate detection via BK-tree over dhash_8 values."""
 
-from typing import Any, Dict, Iterator, List
+from typing import Any, Dict, Iterator, List, Set, Tuple
 
 from lumina.analysis.hashing import hamming_distance
 
@@ -28,7 +28,7 @@ def detect_near_duplicates(
         return
 
     tree = BKTree(hamming_distance, hashable)
-    seen: set = set()
+    seen: Set[Tuple[str, str]] = set()
     max_dist = int(threshold)
 
     for img_id, img_hash in hashable:

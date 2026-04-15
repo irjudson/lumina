@@ -1,8 +1,9 @@
 """Pure Python BK-tree for efficient nearest-neighbor search in metric spaces.
 
 A BK-tree supports queries of the form "find all items within distance d
-of query q" in O(n^d) average case — much faster than O(n²) brute force
-for low-dimensional metric spaces like Hamming distance over perceptual hashes.
+of query q". Triangle inequality pruning eliminates large subtrees early,
+giving far better average performance than O(n²) brute force for
+sparse metric spaces like Hamming distance over perceptual hashes.
 """
 
 from typing import Any, Callable, Iterable, List, Tuple
