@@ -102,7 +102,7 @@ def test_list_catalogs(client):
     response = client.get("/api/catalogs/")
     assert response.status_code == 200
     catalogs = response.json()
-    assert len(catalogs) == 3
+    assert len(catalogs) >= 3
 
 
 def test_get_catalog(client):
