@@ -110,6 +110,7 @@ class JobRegistry:
 
 # Global registry instance
 REGISTRY = JobRegistry()
+job_registry = REGISTRY  # alias for convenience / test access
 
 
 def register_job(job: ParallelJob) -> ParallelJob:

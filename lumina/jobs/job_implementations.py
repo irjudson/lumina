@@ -8,6 +8,9 @@ from ..analysis.scanner import ImageScanner
 from ..db import CatalogDB as CatalogDatabase
 from .background_jobs import should_stop_job, update_job_status
 from .definitions import hash_v2  # noqa: F401  - registers hash_images_v2 job
+from .definitions import (  # noqa: F401  - registers detect_duplicates_v2 job
+    detect_duplicates_v2,
+)
 from .types import JobContext
 
 logger = logging.getLogger(__name__)
@@ -1255,7 +1258,7 @@ def _run_framework_job(ctx: "JobContext", job_name: str) -> Dict[str, Any]:
         raise ValueError(f"No framework job registered under name '{job_name}'")
 
     executor = JobExecutor(job)
-    return executor.run(ctx.job_id, ctx.catalog_id)
+    return executor.run(ctx.job_id, ctx.catalog_id, **ctx.parameters)
 
 
 # Job registry
@@ -1269,4 +1272,5 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "extract_metadata_columns": extract_metadata_columns_job,
     "test": test_job,  # Test job for verification
     "hash_images_v2": lambda ctx: _run_framework_job(ctx, "hash_images_v2"),
+    "detect_duplicates_v2": lambda ctx: _run_framework_job(ctx, "detect_duplicates_v2"),
 }

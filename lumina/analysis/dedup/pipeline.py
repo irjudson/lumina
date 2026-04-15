@@ -24,7 +24,7 @@ def load_suppression_set(catalog_id: str, session: Session) -> Set[Tuple[str, st
             FROM suppression_pairs sp
             WHERE EXISTS (
                 SELECT 1 FROM images i
-                WHERE i.id = sp.id_a AND i.catalog_id = :cid::uuid
+                WHERE i.id = sp.id_a AND i.catalog_id = CAST(:cid AS uuid)
             )
         """
         ),
