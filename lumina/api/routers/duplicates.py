@@ -236,8 +236,9 @@ def decide_candidate(
 
     db.commit()
 
-    # Check if threshold drifted enough to trigger a reprocess job
-    _maybe_trigger_reprocess(str(catalog_id), candidate.layer, db)
+    # Check if threshold drifted enough to trigger a reprocess job (not for deferred)
+    if body.decision != "deferred":
+        _maybe_trigger_reprocess(str(catalog_id), candidate.layer, db)
 
     return {"decision_id": decision_id, "status": "recorded"}
 

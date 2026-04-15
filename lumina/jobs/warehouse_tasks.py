@@ -241,7 +241,7 @@ def check_hash_images_v2(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict
                     SELECT COUNT(*)
                     FROM images
                     WHERE catalog_id = :catalog_id
-                    AND (dhash IS NULL OR ahash IS NULL OR whash IS NULL)
+                    AND (dhash_16 IS NULL OR dhash_32 IS NULL)
                     AND file_type != 'video'
                 """
                 ),
@@ -278,7 +278,7 @@ def check_detect_duplicates_v2(catalog_id: str, config: Dict) -> Tuple[bool, int
                     """
                     SELECT COUNT(*)
                     FROM images i
-                    WHERE i.catalog_id = :catalog_id
+                    WHERE i.catalog_id = CAST(:catalog_id AS uuid)
                     AND i.dhash IS NOT NULL
                     AND NOT EXISTS (
                         SELECT 1 FROM duplicate_candidates dc
