@@ -34,13 +34,13 @@ DEFAULT_THRESHOLDS = {
 }
 
 
-def _load_images(
-    catalog_id: str,
-    session,
-    mode: str = "new",
-    since_id: Optional[str] = None,
-) -> List[Dict]:
-    """Load images from database for detection."""
+def _load_images(catalog_id: str, session, mode: str = "full") -> List[Dict]:
+    """Load images from database for detection.
+
+    For mode='new', returns only images that haven't appeared in any
+    duplicate_candidates row yet (never been through detection).
+    For 'full' and 'layer', returns all active images.
+    """
     base_query = """
         SELECT id, source_path, checksum, format, dhash, ahash, whash,
                dhash_16, dhash_32, width, height, capture_time,
@@ -48,15 +48,15 @@ def _load_images(
         FROM images
         WHERE catalog_id = CAST(:cid AS uuid) AND status_id = 'active'
     """
-    params: Dict[str, Any] = {"cid": catalog_id}
-
-    if mode == "new" and since_id:
-        base_query += (
-            " AND created_at > (SELECT created_at FROM images WHERE id = :since)"
-        )
-        params["since"] = since_id
-
-    rows = session.execute(text(base_query), params).fetchall()
+    if mode == "new":
+        base_query += """
+            AND NOT EXISTS (
+                SELECT 1 FROM duplicate_candidates dc
+                WHERE (dc.image_id_a = images.id OR dc.image_id_b = images.id)
+                AND dc.catalog_id = CAST(:cid AS uuid)
+            )
+        """
+    rows = session.execute(text(base_query), {"cid": catalog_id}).fetchall()
     return [dict(r._mapping) for r in rows]
 
 
