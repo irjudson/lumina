@@ -90,6 +90,65 @@ def _clear_unreviewed(catalog_id: str, layer: Optional[str], session) -> None:
     )
 
 
+def _ensure_hashes(catalog_id: str, session) -> int:
+    """Compute dhash_16/dhash_32 for any active images that are missing them.
+
+    Called automatically before detection layers so callers never need to
+    run hash_images_v2 separately first.  Returns the number of images hashed.
+    """
+    from lumina.analysis.hashing import compute_all_hashes_v2
+
+    rows = session.execute(
+        text(
+            """
+            SELECT id, source_path FROM images
+            WHERE catalog_id = CAST(:cid AS uuid)
+              AND status_id = 'active'
+              AND (dhash_16 IS NULL OR dhash_32 IS NULL)
+              AND file_type != 'video'
+            """
+        ),
+        {"cid": catalog_id},
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    logger.info(f"Computing hashes for {len(rows)} images before detection")
+    count = 0
+    for row in rows:
+        try:
+            hashes = compute_all_hashes_v2(row.source_path)
+            session.execute(
+                text(
+                    """
+                    UPDATE images SET
+                        dhash    = :dhash_8,
+                        dhash_16 = :dhash_16,
+                        dhash_32 = :dhash_32,
+                        ahash    = :ahash,
+                        whash    = :whash
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "dhash_8": hashes["dhash_8"],
+                    "dhash_16": hashes["dhash_16"],
+                    "dhash_32": hashes["dhash_32"],
+                    "ahash": hashes["ahash"],
+                    "whash": hashes["whash"],
+                    "id": row.id,
+                },
+            )
+            count += 1
+        except Exception as e:
+            logger.warning(f"Failed to hash image {row.id}: {e}")
+
+    session.commit()
+    logger.info(f"Hashed {count}/{len(rows)} images")
+    return count
+
+
 def discover_catalog(catalog_id: str, **kwargs) -> List[str]:
     """Discovery: returns a single-item list so finalize runs once."""
     return [catalog_id]
@@ -117,6 +176,7 @@ def run_all_layers(
             _clear_unreviewed(catalog_id, layer, session)
         session.commit()
 
+        _ensure_hashes(catalog_id, session)
         images = _load_images(catalog_id, session, mode)
         thresholds = _load_thresholds(catalog_id, session)
         suppressed = load_suppression_set(catalog_id, session)
