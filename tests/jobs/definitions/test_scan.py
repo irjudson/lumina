@@ -19,5 +19,5 @@ def test_scan_job_has_required_functions():
 def test_scan_job_configuration():
     """Scan job should have appropriate settings."""
     assert scan_job.batch_size == 500
-    assert scan_job.max_workers == 4
+    assert scan_job.max_workers == 1
     assert scan_job.finalize is not None

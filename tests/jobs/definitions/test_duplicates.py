@@ -21,7 +21,7 @@ def test_duplicates_job_configuration() -> None:
     """Duplicates job should have appropriate settings."""
     assert duplicates_job.batch_size == 1000
     assert duplicates_job.finalize is not None
-    assert duplicates_job.max_workers == 4
+    assert duplicates_job.max_workers == 1
 
 
 def test_discover_with_provider() -> None:
