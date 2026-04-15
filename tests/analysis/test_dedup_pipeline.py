@@ -331,3 +331,104 @@ def test_l3_format_variant_raw_is_image_id_a():
     assert pairs[0].detection_meta["format_a"] in ("arw", "jpeg")
     assert pairs[0].detection_meta["format_b"] in ("arw", "jpeg")
     assert pairs[0].detection_meta["format_a"] != pairs[0].detection_meta["format_b"]
+
+
+def test_l4_preview_detects_scaled_image(tmp_path):
+    """A scaled-down copy of an image should be flagged as preview."""
+    from datetime import datetime
+
+    from PIL import Image as PILImage
+
+    from lumina.analysis.dedup.layers.l4_preview import detect_previews
+    from lumina.analysis.hashing import compute_dhash
+
+    # Create a 1000x1000 "original"
+    orig_path = tmp_path / "original.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(100, 150, 200)).save(orig_path)
+
+    # Create a 400x400 "preview" of same content (scale=0.4 > 0.25, uses dhash_8)
+    # Note: 200x200 would give scale=0.2 ≤ 0.25 and be skipped by the scale gate.
+    preview_path = tmp_path / "Previews" / "original_preview.jpg"
+    preview_path.parent.mkdir()
+    PILImage.new("RGB", (400, 400), color=(100, 150, 200)).save(preview_path)
+
+    images = [
+        {
+            "id": "orig",
+            "source_path": str(orig_path),
+            "width": 1000,
+            "height": 1000,
+            "format": "jpeg",
+            "dhash": compute_dhash(orig_path, 8),
+            "dhash_16": compute_dhash(orig_path, 16),
+            "dhash_32": compute_dhash(orig_path, 32),
+            "created_at": datetime(2024, 1, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+        {
+            "id": "prev",
+            "source_path": str(preview_path),
+            "width": 400,
+            "height": 400,
+            "format": "jpeg",
+            "dhash": compute_dhash(preview_path, 8),
+            "dhash_16": compute_dhash(preview_path, 16),
+            "dhash_32": compute_dhash(preview_path, 32),
+            "created_at": datetime(2024, 6, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+    ]
+    pairs = list(detect_previews(images, threshold=6))
+    assert len(pairs) == 1
+    assert pairs[0].layer == "preview"
+    assert pairs[0].image_id_a == "orig"  # "orig" < "prev" lexicographically
+
+
+def test_l4_small_image_requires_corroboration(tmp_path):
+    """Image <1MP without corroborating signals must NOT produce a candidate."""
+    from datetime import datetime
+
+    from PIL import Image as PILImage
+
+    from lumina.analysis.dedup.layers.l4_preview import detect_previews
+    from lumina.analysis.hashing import compute_dhash
+
+    orig_path = tmp_path / "original.jpg"
+    PILImage.new("RGB", (2000, 1000), color=(50, 100, 150)).save(orig_path)
+
+    small_path = tmp_path / "small_unknown.jpg"  # no preview path signal
+    PILImage.new("RGB", (500, 250), color=(50, 100, 150)).save(small_path)
+
+    images = [
+        {
+            "id": "orig",
+            "source_path": str(orig_path),
+            "width": 2000,
+            "height": 1000,
+            "format": "jpeg",
+            "dhash": compute_dhash(orig_path, 8),
+            "dhash_16": compute_dhash(orig_path, 16),
+            "dhash_32": compute_dhash(orig_path, 32),
+            "created_at": datetime(2024, 1, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+        {
+            "id": "small",
+            "source_path": str(small_path),
+            "width": 500,
+            "height": 250,
+            "format": "jpeg",
+            "dhash": compute_dhash(small_path, 8),
+            "dhash_16": compute_dhash(small_path, 16),
+            "dhash_32": compute_dhash(small_path, 32),
+            "created_at": datetime(2024, 1, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+    ]
+    pairs = list(detect_previews(images, threshold=6))
+    # 500*250 = 125,000 < 1MP, no path signals, 0 corroboration → skip
+    assert len(pairs) == 0
