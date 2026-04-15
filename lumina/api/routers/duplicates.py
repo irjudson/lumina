@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from ...analysis.dedup.archive import archive_image, restore_image
 from ...db import get_db
 from .catalogs import get_catalog
 
@@ -159,6 +160,15 @@ def decide_candidate(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    # Validate primary_id is one of the two candidate images
+    if body.decision == "confirmed_duplicate":
+        valid_ids = {str(candidate.image_id_a), str(candidate.image_id_b)}
+        if body.primary_id not in valid_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"primary_id must be one of the two candidate image IDs: {valid_ids}",
+            )
+
     # 1. Write decision
     decision_id = str(uuid.uuid4())
     db.execute(
@@ -206,8 +216,6 @@ def decide_candidate(
             if str(candidate.image_id_b) != body.primary_id
             else candidate.image_id_a
         )
-        from ...analysis.dedup.archive import archive_image
-
         archive_image(
             image_id=str(archive_id),
             decision_id=decision_id,
@@ -452,8 +460,6 @@ def restore_archived(
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Archived image not found")
-    from ...analysis.dedup.archive import restore_image
-
     restore_image(archived_id, db)
     db.commit()
     return {"restored": archived_id}
