@@ -235,7 +235,71 @@ def decide_candidate(
         )
 
     db.commit()
+
+    # Check if threshold drifted enough to trigger a reprocess job
+    _maybe_trigger_reprocess(str(catalog_id), candidate.layer, db)
+
     return {"decision_id": decision_id, "status": "recorded"}
+
+
+def _maybe_trigger_reprocess(catalog_id: str, layer: str, db: Session) -> None:
+    """Submit a targeted reprocess job if threshold drifted ≥ 1 bit since last run."""
+    # Only layers with adaptive thresholds
+    if layer not in ("format_variant", "preview", "near_duplicate"):
+        return
+
+    row = db.execute(
+        text(
+            """
+            SELECT threshold, last_run_threshold FROM detection_thresholds
+            WHERE catalog_id = CAST(:cid AS uuid) AND layer = :layer
+        """
+        ),
+        {"cid": catalog_id, "layer": layer},
+    ).fetchone()
+    if not (row and row.last_run_threshold is not None):
+        return
+
+    if abs(row.threshold - row.last_run_threshold) < 1.0:
+        return
+
+    # Threshold has drifted — submit a targeted reprocess job
+    from ...jobs.background_jobs import (
+        create_job,
+        has_active_job,
+        run_job_in_background,
+    )
+    from ...jobs.job_implementations import JOB_FUNCTIONS
+
+    job_type = "detect_duplicates_v2"
+    if has_active_job(catalog_id, job_type):
+        logger.info(
+            f"Skipping reprocess for layer {layer}: detect_duplicates_v2 already active"
+        )
+        return
+
+    try:
+        job = create_job(
+            db,
+            job_type=job_type,
+            catalog_id=catalog_id,
+            parameters={"mode": "layer", "layer": layer},
+            job_source="warehouse",
+            priority=15,
+            warehouse_trigger=f"threshold drift ≥ 1 bit on layer {layer}",
+        )
+        run_job_in_background(
+            job_id=job.id,
+            catalog_id=catalog_id,
+            func=JOB_FUNCTIONS[job_type],
+            parameters={"mode": "layer", "layer": layer},
+        )
+        logger.info(
+            f"Triggered detect_duplicates_v2 reprocess for layer {layer} "
+            f"(threshold drifted from {row.last_run_threshold:.2f} to {row.threshold:.2f})"
+        )
+    except Exception as e:
+        logger.warning(f"Could not trigger reprocess for layer {layer}: {e}")
 
 
 def _update_threshold(

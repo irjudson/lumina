@@ -221,6 +221,85 @@ def check_score_quality(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict]
     return (False, 0, {})
 
 
+def check_hash_images_v2(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict]:
+    """Check if there are images missing multi-resolution perceptual hashes.
+
+    Args:
+        catalog_id: Catalog ID
+        config: Configuration dict with threshold settings
+
+    Returns:
+        Tuple of (should_run, count, job_parameters)
+    """
+    min_count = config.get("min_images", 5)
+
+    try:
+        with get_db_context() as db:
+            result = db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM images
+                    WHERE catalog_id = :catalog_id
+                    AND (dhash IS NULL OR ahash IS NULL OR whash IS NULL)
+                    AND file_type != 'video'
+                """
+                ),
+                {"catalog_id": catalog_id},
+            )
+            count = result.scalar() or 0
+
+            if count >= min_count:
+                return (True, count, {})
+
+    except Exception as e:
+        logger.error(f"Error checking unhashed images: {e}")
+
+    return (False, 0, {})
+
+
+def check_detect_duplicates_v2(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict]:
+    """Check if there are newly hashed images not yet checked for duplicates.
+
+    Args:
+        catalog_id: Catalog ID
+        config: Configuration dict with threshold settings
+
+    Returns:
+        Tuple of (should_run, count, job_parameters)
+    """
+    min_count = config.get("min_images", 5)
+
+    try:
+        with get_db_context() as db:
+            # Images that have hashes but no duplicate_candidates entry on either side
+            result = db.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM images i
+                    WHERE i.catalog_id = :catalog_id
+                    AND i.dhash IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM duplicate_candidates dc
+                        WHERE dc.catalog_id = CAST(:catalog_id AS uuid)
+                          AND (dc.image_id_a = i.id OR dc.image_id_b = i.id)
+                    )
+                """
+                ),
+                {"catalog_id": catalog_id},
+            )
+            count = result.scalar() or 0
+
+            if count >= min_count:
+                return (True, count, {"mode": "new"})
+
+    except Exception as e:
+        logger.error(f"Error checking images needing duplicate detection: {e}")
+
+    return (False, 0, {})
+
+
 # Warehouse task registry
 WAREHOUSE_TASKS: Dict[str, WarehouseTask] = {
     "retag_low_confidence": WarehouseTask(
@@ -272,6 +351,26 @@ WAREHOUSE_TASKS: Dict[str, WarehouseTask] = {
         default_interval_minutes=240,  # Every 4 hours
         default_threshold={
             "min_images": 20,
+        },
+    ),
+    "hash_images_v2": WarehouseTask(
+        task_type="hash_images_v2",
+        job_type="hash_images_v2",
+        priority=25,  # Between MEDIUM and HIGH — runs after thumbnails
+        need_assessment=check_hash_images_v2,
+        default_interval_minutes=30,  # Every 30 minutes
+        default_threshold={
+            "min_images": 5,
+        },
+    ),
+    "detect_duplicates_v2": WarehouseTask(
+        task_type="detect_duplicates_v2",
+        job_type="detect_duplicates_v2",
+        priority=15,  # Just above LOW — runs after hashing
+        need_assessment=check_detect_duplicates_v2,
+        default_interval_minutes=60,  # Every hour
+        default_threshold={
+            "min_images": 5,
         },
     ),
 }
