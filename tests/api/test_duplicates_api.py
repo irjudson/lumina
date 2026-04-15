@@ -1,6 +1,8 @@
 """Basic smoke tests for duplicate review API endpoints."""
 
-import requests
+import pytest
+
+requests = pytest.importorskip("requests")
 
 CATALOG_ID = "36ee8b6f-9bfc-4bcd-a0ad-3e5a26946886"
 BASE = f"http://localhost:8765/api/catalogs/{CATALOG_ID}"
