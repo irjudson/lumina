@@ -146,7 +146,9 @@ class Image(Base):
     ahash = Column(Text)
     whash = Column(Text)  # Wavelet hash - most robust to transformations
     dhash_16 = Column(Text)  # 256-bit hash for L4 preview detection (scale > 0.5)
-    dhash_32 = Column(Text)  # 1024-bit hash for L4 preview detection (scale > 0.25)
+    dhash_32 = Column(
+        Text
+    )  # 1024-bit hash — populated by hash_images_v2, reserved for future use
 
     # Geohash columns for spatial queries (populated for images with GPS)
     geohash_4 = Column(String(4))  # ~39km precision (country view)

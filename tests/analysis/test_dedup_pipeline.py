@@ -432,3 +432,54 @@ def test_l4_small_image_requires_corroboration(tmp_path):
     pairs = list(detect_previews(images, threshold=6))
     # 500*250 = 125,000 < 1MP, no path signals, 0 corroboration → skip
     assert len(pairs) == 0
+
+
+def test_l4_preview_detects_large_scale_image(tmp_path):
+    """scale > 0.5 branch (dhash_16, 256-bit) is exercised for an 80% size preview."""
+    from datetime import datetime
+
+    from PIL import Image as PILImage
+
+    from lumina.analysis.dedup.layers.l4_preview import detect_previews
+    from lumina.analysis.hashing import compute_dhash
+
+    orig_path = tmp_path / "original.jpg"
+    PILImage.new("RGB", (1000, 1000), color=(80, 120, 160)).save(orig_path)
+
+    # 800x800 → scale = sqrt(640000/1000000) = 0.8 > 0.5 → uses dhash_16
+    preview_path = tmp_path / "Previews" / "original_lg.jpg"
+    preview_path.parent.mkdir()
+    PILImage.new("RGB", (800, 800), color=(80, 120, 160)).save(preview_path)
+
+    images = [
+        {
+            "id": "orig",
+            "source_path": str(orig_path),
+            "width": 1000,
+            "height": 1000,
+            "format": "jpeg",
+            "dhash": compute_dhash(orig_path, 8),
+            "dhash_16": compute_dhash(orig_path, 16),
+            "dhash_32": compute_dhash(orig_path, 32),
+            "created_at": datetime(2024, 1, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+        {
+            "id": "prev_lg",
+            "source_path": str(preview_path),
+            "width": 800,
+            "height": 800,
+            "format": "jpeg",
+            "dhash": compute_dhash(preview_path, 8),
+            "dhash_16": compute_dhash(preview_path, 16),
+            "dhash_32": compute_dhash(preview_path, 32),
+            "created_at": datetime(2024, 6, 1),
+            "capture_time": datetime(2024, 1, 1),
+            "metadata_json": {},
+        },
+    ]
+    pairs = list(detect_previews(images, threshold=6))
+    assert len(pairs) == 1
+    assert pairs[0].layer == "preview"
+    assert pairs[0].detection_meta["hash_bits"] == 256
