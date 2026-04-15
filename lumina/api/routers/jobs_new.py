@@ -187,13 +187,12 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     if job.status in ("SUCCESS", "FAILURE"):
         raise HTTPException(status_code=400, detail="Cannot cancel completed job")
 
-    # Try to cancel the running job
-    cancelled = cancel_job_bg(job_id)
+    # Mark as cancelled via the request's db session (ensures test isolation)
+    job.status = "FAILURE"
+    job.error = "Cancelled by user"
+    db.commit()
 
-    if not cancelled:
-        # Job not running or already completed, mark as cancelled in DB
-        job.status = "FAILURE"
-        job.error = "Cancelled by user"
-        db.commit()
+    # Additionally attempt to stop any running future
+    cancel_job_bg(job_id)
 
     return {"message": "Job cancelled"}
