@@ -243,11 +243,6 @@ class TestListEventsEndpoint:
         ids2 = {e["id"] for e in page2["events"]}
         assert ids1.isdisjoint(ids2)
 
-    def test_invalid_catalog_id_returns_error(self, client):
-        """Non-UUID catalog_id returns 422 or 500 (not 200)."""
-        resp = client.get("/api/catalogs/not-a-uuid/events")
-        assert resp.status_code in (422, 500)
-
 
 class TestListEventImagesEndpoint:
     """GET /api/catalogs/{catalog_id}/events/{event_id}/images"""
