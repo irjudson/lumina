@@ -1,372 +1,489 @@
-# Lumina - User Guide
+# Lumina User Guide
 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
-- [Quick Start](#quick-start)
-- [Command Reference](#command-reference)
 - [Web Interface](#web-interface)
-- [Common Tasks](#common-tasks)
+- [Background Jobs](#background-jobs)
+- [Duplicate Detection and Review](#duplicate-detection-and-review)
+- [Burst Management](#burst-management)
+- [Event Detection](#event-detection)
+- [Image Classification and Tagging](#image-classification-and-tagging)
+- [File Organization](#file-organization)
+- [REST API Reference](#rest-api-reference)
 - [Troubleshooting](#troubleshooting)
-- [Advanced Usage](#advanced-usage)
+
+---
 
 ## Getting Started
 
-### Installation
+### Docker (Recommended)
 
 ```bash
-# Clone or navigate to the project
+git clone https://github.com/irjudson/lumina.git
 cd lumina
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install the package
-pip install -e .
+cp .env.example .env
+# Edit .env: set CATALOG_PATH and PHOTOS_PATH
+docker compose up -d
+open http://localhost:8765
 ```
+
+Lumina creates a default catalog called "My Photos" on first start and mounts your photo library read-only.
+
+### Native Python
+
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -e ".[dev]"
+
+# Start the API server
+lumina-web
+```
+
+Then open http://localhost:8765.
 
 ### System Requirements
 
-**Required:**
-- Python 3.9+ (supports 3.9, 3.10, 3.11, 3.12)
-- ExifTool for metadata extraction
+- Python 3.11+
+- PostgreSQL 14+ with pgvector extension
+- ExifTool (for metadata extraction)
+- Optional: Ollama (for AI classification and tagging)
+- Optional: NVIDIA GPU with CUDA 12.4 (for 20-30x faster hashing)
 
-**Install ExifTool:**
+Install ExifTool:
 ```bash
 # macOS
 brew install exiftool
 
 # Ubuntu/Debian
 sudo apt-get install libimage-exiftool-perl
-
-# Verify installation
-which exiftool
 ```
 
-**Optional:**
-- pillow-heif for HEIC/HEIF image support (included in requirements)
-
-## Quick Start
-
-### Basic Workflow
-
-1. **Analyze your photos** to build a catalog
-2. **Browse the catalog** using the web interface
-3. **Review duplicates** and conflicts
-4. **(Future) Execute organization** to reorganize files
-
-### Your First Scan
-
-```bash
-# Activate environment
-source venv/bin/activate
-
-# Scan a directory (start small)
-lumina-analyze ~/my-catalog --source ~/Pictures/vacation-2023
-
-# View results in web browser
-vam-web ~/my-catalog
-```
-
-Then open http://localhost:8765 in your browser.
-
-## Command Reference
-
-### lumina-analyze
-
-Build or update a photo catalog by scanning source directories.
-
-```bash
-lumina-analyze CATALOG_PATH --source SOURCE_DIR [OPTIONS]
-```
-
-**Arguments:**
-- `CATALOG_PATH`: Directory where catalog database will be stored
-
-**Options:**
-- `-s, --source PATH`: Source directory to scan (can specify multiple)
-- `-v, --verbose`: Enable detailed logging
-- `-w, --workers N`: Number of parallel workers (default: CPU count)
-- `--detect-duplicates`: Enable perceptual duplicate detection
-- `--similarity-threshold N`: Hamming distance threshold for duplicates (default: 5)
-
-**Examples:**
-
-```bash
-# Simple scan
-lumina-analyze /path/to/catalog --source /path/to/photos
-
-# Scan multiple directories
-lumina-analyze /path/to/catalog \
-  --source ~/Pictures \
-  --source /mnt/external/photos \
-  --source /mnt/backup/photos
-
-# With duplicate detection
-lumina-analyze /path/to/catalog \
-  --source ~/Pictures \
-  --detect-duplicates \
-  --similarity-threshold 3
-
-# Verbose with custom workers
-lumina-analyze /path/to/catalog \
-  --source ~/Pictures \
-  --workers 16 \
-  --verbose
-```
-
-**Output:**
-```
-Lumina - Analysis
-
-Catalog: /home/user/my-catalog
-Sources: /home/user/Pictures
-
-Starting scan...
-
-Processing files... ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 100% 0:00:00
-
-✓ Scan complete!
-
-               Catalog Statistics
-┏━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-┃ Metric                ┃       Value ┃
-┡━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-│ Total Images          │         523 │
-│ Total Videos          │          12 │
-│ Total Size            │     2.34 GB │
-│ Images with no date   │          15 │
-└───────────────────────┴─────────────┘
-```
-
-### lumina-web
-
-Launch the web interface to browse and review your catalog.
-
-```bash
-lumina-web CATALOG_PATH [OPTIONS]
-```
-
-**Arguments:**
-- `CATALOG_PATH`: Path to catalog directory
-
-**Options:**
-- `--host HOST`: Host to bind to (default: 127.0.0.1)
-- `--port PORT`: Port to bind to (default: 8765)
-- `--reload`: Enable auto-reload for development
-
-**Examples:**
-
-```bash
-# Start server on default port
-lumina-web /path/to/catalog
-
-# Custom port
-lumina-web /path/to/catalog --port 8080
-
-# Make accessible on network
-lumina-web /path/to/catalog --host 0.0.0.0 --port 8765
-
-# Development mode with auto-reload
-lumina-web /path/to/catalog --reload
-```
-
-Then open http://localhost:8765 in your browser.
+---
 
 ## Web Interface
 
-### Dashboard
+Access Lumina at http://localhost:8765. The interface has a three-panel layout:
 
-The dashboard displays catalog overview and statistics:
+- **Left sidebar** — Navigation and filters
+- **Center** — Image grid or view content
+- **Right** — Image metadata and details
 
-**File Types Chart** 📊
-- Toggle between Category View (Images/Videos) and Extension View (.jpg, .png, etc.)
-- Bar chart shows count of each type
+### Library View
 
-**Size Distribution Chart** 📈
-- Histogram showing file size distribution:
-  - < 100 KB
-  - 100 KB - 1 MB
-  - 1 MB - 5 MB
-  - 5 MB - 10 MB
-  - 10 MB - 50 MB
-  - > 50 MB
+The main image grid. Use the left sidebar to navigate:
 
-**Issues Chart** ⚠️
-- Doughnut chart showing:
-  - **No Date**: Files with no date information
-  - **Suspicious Date**: Questionable dates (future, very old, defaults)
-  - **Low Confidence**: Date confidence < 70%
+**Library section** (always visible):
+- All Photos
+- Images only
+- Videos only
+- No Date
+- Suspicious Dates
+- Rejected / Archived
 
-**Overview Card** 📋
-- Total file count
-- Total catalog size
+**Smart Views** (collapsible):
+- Duplicates — images flagged as duplicate candidates
+- Bursts — rapid-fire sequence images
+- Events — GPS-clustered photographic events
+- Timeline — chronological browsing
+- Map — geographic map of GPS-tagged images
+- Collections — smart groupings
 
-### Navigation
+**Filter by Tag** (collapsible):
+- Browse all tags applied to images
+- Click any tag to filter the grid
+- Multiple tags can be selected
 
-**Scroll Mode (Default)** 📜
-- Images load continuously as you scroll
-- Shows "X of Y images" counter
-- Automatically loads more at bottom
-- Click "Load More Images" button
-- Perfect for browsing large catalogs
+### Image Cards
 
-**Page Mode** 📄
-- Traditional pagination with Previous/Next buttons
-- Shows "Page X of ~Y" indicator
-- Navigate with arrow keys (← →) or H/L keys
-- Better for jumping to specific sections
+Each card shows a thumbnail. On hover:
+- Primary tag is shown at the bottom
+- Content class badge (screenshot, document, etc.) shown if classified
 
-Toggle with the **Scroll/Page Mode** button or press **S** key.
+Click a card to open the detail overlay with full metadata, all extracted dates, EXIF data, and quality score.
 
 ### Filtering and Sorting
 
-**Filter by:**
-- **All Images**: Show everything
-- **Images Only**: Only image files (no videos)
-- **Videos Only**: Only video files
-- **No Date**: Files where no date could be extracted
-- **Suspicious Dates**: Files with questionable dates
-
-**Sort by:**
-- **Date**: Chronological order (newest first)
-- **Path**: Alphabetical by file path
-- **Size**: Largest files first
+The toolbar above the grid lets you:
+- Filter by file type, status, content class, date quality
+- Sort by date, path, or file size (ascending or descending)
+- Switch between infinite scroll and paginated modes
 
 ### Keyboard Shortcuts
 
-- **R** - Refresh data now
-- **S** - Switch between Scroll/Page mode
-- **A** - Toggle auto-refresh on/off
-- **← / →** - Previous/Next page (Page mode only)
-- **H / L** - Previous/Next page (Vim-style, Page mode only)
-- **Escape** - Close image detail modal
+| Key | Action |
+|-----|--------|
+| `R` | Refresh |
+| `S` | Toggle scroll / page mode |
+| `← / →` | Previous / next page (page mode) |
+| `H / L` | Previous / next page (Vim-style) |
+| `Esc` | Close overlay |
 
-### Image Details
+---
 
-Click any image card to view:
-- Larger preview
-- Full file path
-- All extracted dates (EXIF, filename, directory, filesystem)
-- Date source and confidence score
-- Resolution, format, file size
-- Complete EXIF metadata
+## Background Jobs
 
-### Duplicate Review
+All long-running operations run as background jobs. Submit them from the **Quick Actions** panel in the library view, or from the Settings page for a specific catalog.
 
-When duplicates are detected (`--detect-duplicates` flag):
+Jobs update their progress in real time — a progress bar appears in the UI while any job is running.
 
-**Duplicate Groups Page:**
-- View all detected duplicate groups
-- See quality scores for each image
-- Side-by-side comparison
-- Recommended primary selection
-- Manual override controls (future)
+### Job Types
 
-## Common Tasks
+| Job | What it does |
+|-----|-------------|
+| **Scan** | Discover files, extract EXIF/XMP metadata, compute checksums |
+| **Extract Metadata Columns** | Populate typed database columns (capture_time, GPS, camera, etc.) from JSONB metadata — run after every scan |
+| **Hash Images** | Compute perceptual hashes (dHash, aHash, wHash, dhash_16) |
+| **Find Duplicates** | Run five-layer duplicate detection pipeline |
+| **Auto-Resolve Duplicates** | Automatically resolve zero-hamming duplicate pairs using quality rules |
+| **Generate Thumbnails** | Create image thumbnails for the web UI |
+| **Detect Bursts** | Group rapid-fire sequences and select the best shot |
+| **Detect Events** | Cluster GPS images by time and location into photographic events |
+| **Classify Images** | Label images as photo, screenshot, document, etc. |
+| **Auto-Tag** | Generate descriptive tags via OpenCLIP (GPU) or Ollama VLM |
+| **Organize** | Reorganize files into a date-based directory structure |
 
-### Initial Catalog Scan
+### Recommended Workflow for a New Library
 
-Start with a small test directory to verify everything works:
+1. **Scan** — builds the catalog
+2. **Extract Metadata Columns** — populates typed columns needed by downstream jobs
+3. **Hash Images** — required before duplicate detection
+4. **Find Duplicates** — surfaces duplicate candidates
+5. **Generate Thumbnails** — enables image previews
+6. **Detect Bursts** — optional; requires metadata columns
+7. **Detect Events** — optional; requires GPS data and metadata columns
+8. **Classify Images** — optional; labels content type
+9. **Auto-Tag** — optional; requires OpenCLIP or Ollama
+10. **Organize** — optional; moves/copies files to date structure
 
-```bash
-# Scan a small test set (10-100 images)
-vam-analyze ~/test-catalog --source ~/Pictures/test-batch
+### Cancelling Jobs
 
-# View results
-vam-web ~/test-catalog
+Click the **Cancel** button in the progress panel. Most jobs check for cancellation at regular intervals and stop cleanly.
+
+---
+
+## Duplicate Detection and Review
+
+### How Detection Works
+
+Lumina uses a five-layer pipeline to find duplicates at different levels of similarity:
+
+| Layer | What it finds |
+|-------|--------------|
+| L1 Exact | Identical file content (same SHA-256 checksum) |
+| L2 Re-import | Same image exported or copied to a new path |
+| L3 Format variant | Same image saved as JPEG + HEIC, or RAW + JPEG |
+| L4 Preview-scale | Full-resolution vs. embedded preview/thumbnail |
+| L5 Near-duplicate | Perceptually similar images (edited, cropped, recompressed) |
+
+### Reviewing Candidates
+
+Navigate to **Duplicates** in the Smart Views section. Each card shows a pair of images with:
+- Their similarity score and detection layer
+- File size, resolution, and format for each
+- A suggested primary (the one to keep)
+
+**Decisions:**
+- **Keep this one** — marks the selected image as primary; the other is archived
+- **Keep both** — dismisses the pair without archiving either
+- **Skip** — moves to the next pair without deciding
+
+### Auto-Resolve
+
+For zero-hamming duplicate pairs (pixel-identical content), use **Auto-Resolve Duplicates** from Quick Actions. It applies deterministic quality rules without requiring manual review:
+
+1. Format tier: RAW > TIFF > HEIC > JPEG > PNG (format_variant layer only)
+2. Resolution: higher pixel count wins
+3. File size: files >5% larger are preferred (better compression retained)
+4. Filename: timestamp-based names preferred over generic `IMG_NNNN`
+5. Tiebreak: larger file size
+
+Resolved pairs get a decision record, the loser is archived, and a suppression pair is recorded to prevent re-surfacing.
+
+### Viewing Duplicate Statistics
+
+The Duplicates view shows a breakdown by layer, total candidate count, and how many have been reviewed vs. pending.
+
+---
+
+## Burst Management
+
+### What is a Burst?
+
+A burst is a rapid sequence of photos taken within a short time window (e.g., holding the shutter button, sports photography, timelapse). Lumina groups these sequences and selects the best shot based on quality score.
+
+### Detecting Bursts
+
+Run **Detect Bursts** from Quick Actions. Default parameters:
+- Gap threshold: 1 second between shots
+- Minimum burst size: 3 images
+
+### Reviewing Bursts
+
+Navigate to **Bursts** in Smart Views. Each burst shows:
+- All images in the sequence with timestamps
+- Quality scores for each
+- The automatically selected best shot (highlighted)
+
+You can override the selection by clicking a different image in the sequence.
+
+---
+
+## Event Detection
+
+### What is an Event?
+
+An event is a cluster of GPS-tagged photos taken within a small geographic area during a continuous time window — a birthday party, hike, sports game, vacation day.
+
+### Detecting Events
+
+Run **Detect Events** from Quick Actions. Default parameters:
+- Max radius: 0.402 km (0.25 miles)
+- Max time gap: 2 hours between consecutive shots
+- Minimum images: 10
+- Minimum duration: 1 hour
+
+Events are scored by density (images per hour) and compactness (tighter radius = higher score). Results replace any previous event detection run.
+
+### Browsing Events
+
+Navigate to **Events** in Smart Views. Events are listed by score (highest first). Each event card shows:
+- Date range and duration
+- Image count and geographic radius
+- Score
+
+Click an event to expand it and see a thumbnail grid of all images in the cluster.
+
+---
+
+## Image Classification and Tagging
+
+### Classification
+
+**Classify Images** labels each image with a content type:
+
+| Class | Description |
+|-------|-------------|
+| `photo` | Real-world photograph |
+| `screenshot` | Screen capture from phone, computer, or app |
+| `document` | Scanned/photographed document, receipt, form |
+| `social_media` | Image with overlaid UI, text, or watermarks |
+| `artwork` | Digital art, illustration, graphic design |
+| `other` | Animated GIF, icon, unclassifiable |
+| `invalid` | Corrupt file, too small to be a real photo |
+| `unknown` | Heuristics undecided (use VLM to resolve) |
+
+Classification uses fast PIL heuristics first (checking dimensions, aspect ratios, known screen resolutions, animated GIFs). Images heuristics can't classify are either left as `unknown` or sent to an Ollama VLM if `use_vlm=true` is set.
+
+Content class badges appear on image cards in the library view.
+
+### Auto-Tagging
+
+**Auto-Tag** generates descriptive tags for your images. Two backends are available:
+
+**OpenCLIP** (recommended for large libraries):
+- GPU-accelerated batch processing
+- Generates tag probabilities against a fixed vocabulary
+- Fast: hundreds of images per minute with a GPU
+
+**Ollama** (more descriptive):
+- Uses a local vision language model (e.g., llava)
+- Sequential per-image processing
+- More flexible, natural-language tags
+
+Tags appear in the **Filter by Tag** sidebar section and on image card hover (primary tag).
+
+---
+
+## File Organization
+
+### Overview
+
+The **Organize** job reorganizes your library into a predictable date-based directory structure:
+
+```
+<output_directory>/
+  2023/06-15/20230615_142300.jpg      ← resolved (EXIF with time)
+  2023/06-15/20230615_142301.jpg
+  _date_only/2023/06-15/              ← date known, time is midnight
+  _rejected/2023/06-15/               ← rejected images
+  _archived/2023/06-15/               ← archived images
+  _unresolved/unknown/                ← no usable date
 ```
 
-### Incremental Updates
+### Date Confidence Tiers
 
-Add new photos to an existing catalog:
+Files are placed into subdirectories based on date confidence:
 
-```bash
-# Scan the same catalog with updated source directories
-vam-analyze /path/to/catalog --source /path/to/photos
+| Tier | Condition | Location |
+|------|-----------|----------|
+| `resolved` | EXIF DateTimeOriginal with real time | Primary tree `YYYY/MM-DD/` |
+| `iffy` | Filename, directory, or EXIF ModifyDate | Primary tree `YYYY/MM-DD/` |
+| `date_only` | Any source where time is midnight | `_date_only/YYYY/MM-DD/` |
+| `unresolved` | No usable date found | `_unresolved/unknown/` |
 
-# The scanner will:
-# - Skip already-processed files (by checksum)
-# - Add new files
-# - Update statistics
+### Scope Options
+
+| Scope | What gets organized |
+|-------|-------------------|
+| `new` (default) | Only images not yet organized |
+| `resolved_only` | Only images with fully resolved EXIF dates |
+| `all` | All images regardless of prior organization |
+
+### Dry Run
+
+Always preview before executing:
+
+1. In Quick Actions, select **Organize (Preview)** — this runs the job with `dry_run=true`
+2. Review the summary: how many files will move, how many collisions, storage required
+3. If satisfied, run **Organize** with `dry_run=false`
+
+### Safety
+
+- Source files are never deleted without a verified checksum match at the destination
+- Collision resolution adds a `_01`, `_02`, ... suffix automatically
+- Excluded paths: anything containing `#recycle` or `Possible Duplicate`
+- The job tracks `organized_path` in the database; re-running with `scope=new` skips already-organized files
+
+---
+
+## REST API Reference
+
+All endpoints are under `/api/`.
+
+### Catalogs
+
+```
+GET    /api/catalogs                          List all catalogs
+POST   /api/catalogs                          Create a catalog
+GET    /api/catalogs/{id}                     Get catalog details
+PATCH  /api/catalogs/{id}                     Update catalog settings
+DELETE /api/catalogs/{id}                     Delete a catalog
+
+GET    /api/catalogs/{id}/images              List images (paginated)
+GET    /api/catalogs/{id}/images/{img_id}     Get image metadata
+GET    /api/catalogs/{id}/images/{img_id}/thumbnail  Get thumbnail
+
+GET    /api/catalogs/{id}/smart-counts        Count images per smart view
+GET    /api/catalogs/{id}/tags                List all tags
+GET    /api/catalogs/{id}/events              List events (sorted by score)
+GET    /api/catalogs/{id}/events/{ev_id}/images  Images in an event
+
+GET    /api/catalogs/{id}/bursts              List burst sequences
+GET    /api/catalogs/{id}/bursts/{burst_id}   Get burst details
+POST   /api/catalogs/{id}/bursts/{burst_id}/select  Set best shot
 ```
 
-### Large Library Scan
+### Jobs
 
-For 10,000+ images:
-
-```bash
-# Use all CPU cores, enable verbose logging
-vam-analyze /path/to/catalog \
-  --source /path/to/large-library \
-  --workers 32 \
-  --verbose
+```
+POST   /api/catalogs/{id}/jobs                Submit a job
+GET    /api/jobs/{job_id}                     Get job status
+POST   /api/jobs/{job_id}/cancel              Cancel a running job
+GET    /api/catalogs/{id}/jobs                List recent jobs
 ```
 
-**Performance:**
-- ~1-5 images/second depending on file size and disk speed
-- Linear scaling up to CPU core count
-- Checkpoints every 100 files (safe to interrupt)
+### Duplicates
 
-### Monitoring Progress
-
-You can run analysis and web viewer simultaneously:
-
-```bash
-# Terminal 1: Start the analysis
-vam-analyze /path/to/catalog --source /path/to/photos
-
-# Terminal 2: Start the web viewer
-vam-web /path/to/catalog
+```
+GET    /api/catalogs/{id}/duplicates/candidates          List candidate pairs
+POST   /api/catalogs/{id}/duplicates/candidates/{c}/decide  Record a decision
+GET    /api/catalogs/{id}/duplicates/stats               Counts by layer
+GET    /api/catalogs/{id}/duplicates/groups              Duplicate groups (legacy)
 ```
 
-Then refresh your browser periodically to see:
-- Updated image counts
-- New images in the grid
-- Real-time statistics
-- Checkpoint progress
-
-The web server automatically reloads the catalog when it detects file changes.
-
-### Finding Duplicates
+### Example: Submit a Scan Job
 
 ```bash
-# Enable duplicate detection
-vam-analyze /path/to/catalog \
-  --source /path/to/photos \
-  --detect-duplicates
-
-# Adjust sensitivity (lower = more sensitive)
-vam-analyze /path/to/catalog \
-  --source /path/to/photos \
-  --detect-duplicates \
-  --similarity-threshold 3
+curl -X POST http://localhost:8765/api/catalogs/{catalog_id}/jobs \
+  -H "Content-Type: application/json" \
+  -d '{"job_type": "scan"}'
 ```
 
-**Similarity Threshold:**
-- **0-3**: Very similar (strict matching)
-- **4-6**: Similar (default: 5)
-- **7-10**: Somewhat similar (loose matching)
+Response:
+```json
+{
+  "job_id": "abc123",
+  "status": "pending",
+  "message": "Job queued"
+}
+```
 
-### Reviewing Images with Issues
+### Example: List Events
 
-1. **No Date**: Filter by "No Date" in web UI to review files that need manual date assignment
-2. **Suspicious Dates**: Review files with future dates, very old dates, or default camera dates
-3. **Low Confidence**: Check files where date confidence is below 70%
+```bash
+curl "http://localhost:8765/api/catalogs/{catalog_id}/events?limit=20&offset=0"
+```
+
+Response:
+```json
+{
+  "events": [
+    {
+      "id": "...",
+      "start_time": "2023-06-15T10:00:00",
+      "end_time": "2023-06-15T14:30:00",
+      "duration_minutes": 270,
+      "image_count": 148,
+      "center_lat": 37.7749,
+      "center_lon": -122.4194,
+      "radius_km": 0.31,
+      "score": 22.4
+    }
+  ],
+  "total": 176
+}
+```
+
+---
 
 ## Troubleshooting
 
-### "Catalog not initialized"
+### No images visible after scan
 
-Make sure you've run `vam-analyze` first:
+Run **Extract Metadata Columns** after scanning — this populates the typed database columns used by most queries and filters.
+
+### Thumbnails not showing
+
+Run **Generate Thumbnails** from Quick Actions. Thumbnails are generated into the catalog's storage directory and served by the API.
+
+### Events not appearing
+
+Events require:
+1. Images with GPS coordinates (`latitude`/`longitude` columns populated)
+2. Images with a valid `capture_time` (run Extract Metadata Columns first)
+3. At least `min_images` (default 10) GPS images within the radius and time window
+
+### Classify Images returns mostly `unknown`
+
+By default, classification only uses heuristics. To use the Ollama VLM for images heuristics can't classify, set `use_vlm=true` in the job parameters and ensure Ollama is running at `OLLAMA_HOST`.
+
+### Auto-Tag produces no results
+
+OpenCLIP requires `open-clip-torch` to be installed. Ollama requires a running Ollama instance with a vision model (e.g., `llava`). Check the job result for the specific error.
+
+### Organize job: "No organized_directory configured"
+
+Set the **Organized Directory** path in catalog Settings before running the organize job.
+
+### Port already in use
+
 ```bash
-vam-analyze /path/to/catalog --source /path/to/photos
+lumina-web --port 8080
 ```
 
-### "ExifTool not found"
+Or in Docker, change `WEB_PORT` in `.env`.
 
-Install ExifTool:
+### HEIC files not processing
+
+Ensure `pillow-heif` is installed:
+```bash
+pip install pillow-heif
+```
+
+### ExifTool not found
+
 ```bash
 # macOS
 brew install exiftool
@@ -376,263 +493,16 @@ sudo apt-get install libimage-exiftool-perl
 
 # Verify
 which exiftool
+exiftool -ver
 ```
 
-### Images not loading in web UI
-
-Check that:
-1. The catalog path is correct
-2. Source files still exist at their original paths
-3. You have read permissions for the source files
-
-### Port already in use
-
-If port 8765 is already in use:
-```bash
-vam-web /path/to/catalog --port 8080
-```
-
-### Scan is slow
-
-Normal performance: ~1-5 images/second depending on:
-- File size (larger files take longer)
-- Disk speed (network drives are slower)
-- CPU speed (EXIF extraction is CPU-bound)
-
-To improve performance:
-- Use local disk instead of network drive
-- Increase workers: `--workers 32`
-- Close other applications
-
-### Out of memory
-
-For very large catalogs (100k+ images):
-- Try smaller batches
-- Close other applications
-- The checkpoint system prevents data loss
-
-### HEIC files not processing
-
-Ensure pillow-heif is installed:
-```bash
-pip install pillow-heif
-```
-
-If still failing, check that files aren't corrupted:
-```bash
-# Try opening with another tool
-exiftool /path/to/image.heic
-```
-
-### Permission denied
-
-Check directory permissions:
-```bash
-# Make sure you have read access
-ls -la /path/to/photos
-
-# If needed, fix permissions
-chmod -R u+r /path/to/photos
-```
-
-### Scan interrupted (Ctrl+C)
-
-The checkpoint system saves progress every 100 files. To resume:
-```bash
-# Just re-run the same command
-vam-analyze /path/to/catalog --source /path/to/photos
-
-# The scanner will:
-# - Load last checkpoint
-# - Skip already-processed files
-# - Continue from where it left off
-```
-
-## Advanced Usage
-
-### REST API
-
-The web interface provides a REST API that you can access directly:
-
-**Get catalog info:**
-```
-GET http://localhost:8765/api/catalog/info
-```
-
-**List images with filtering:**
-```
-GET http://localhost:8765/api/images?skip=0&limit=50&filter_type=no_date&sort_by=date
-```
-
-Parameters:
-- `skip`: Number of images to skip (pagination)
-- `limit`: Max images to return (1-1000)
-- `filter_type`: Filter type (no_date, suspicious, image, video)
-- `sort_by`: Sort order (date, path, size)
-
-**Get image details:**
-```
-GET http://localhost:8765/api/images/{image_id}
-```
-
-**Get image file:**
-```
-GET http://localhost:8765/api/images/{image_id}/file
-```
-
-**Get statistics summary:**
-```
-GET http://localhost:8765/api/statistics/summary
-```
-
-Returns detailed breakdown by format, date source, year, etc.
-
-**Duplicate statistics:**
-```
-GET http://localhost:8765/api/duplicates/stats
-```
-
-**Duplicate groups:**
-```
-GET http://localhost:8765/api/duplicates/groups
-```
-
-**Duplicate group details:**
-```
-GET http://localhost:8765/api/duplicates/groups/{group_id}
-```
-
-### Inspecting the Catalog
-
-The catalog is stored as JSON (human-readable):
-
-```bash
-# View the entire catalog
-cat ~/my-catalog/.catalog.json | jq .
-
-# View just statistics
-cat ~/my-catalog/.catalog.json | jq '.statistics'
-
-# View images with no date
-cat ~/my-catalog/.catalog.json | jq '.images[] | select(.dates.selected_date == null)'
-
-# Count images by format
-cat ~/my-catalog/.catalog.json | jq '.images[].metadata.format' | sort | uniq -c
-```
-
-### Re-running Analysis
-
-If you need to rebuild your catalog (e.g., after updates):
-
-```bash
-# Backup old catalog (optional)
-mv /path/to/catalog/.catalog.json /path/to/catalog/.catalog.json.old
-
-# Delete checkpoint files
-rm -f /path/to/catalog/.catalog.*.json
-rm -f /path/to/catalog/.catalog.lock
-
-# Re-run analysis
-vam-analyze /path/to/catalog --source /path/to/photos --verbose
-```
-
-### Development Mode
-
-For working on the web UI:
-
-```bash
-# Start in reload mode
-vam-web /path/to/catalog --reload
-
-# Edit files in vam_tools/web/
-# - api.py: Backend API endpoints
-# - static/index.html: Frontend UI
-
-# Changes to Python auto-reload
-# Refresh browser to see frontend changes
-```
-
-### Network Access
-
-By default, the web server only accepts connections from localhost. To make it accessible on your network:
-
-```bash
-vam-web /path/to/catalog --host 0.0.0.0 --port 8765
-```
-
-Then access from other devices at: `http://YOUR_IP:8765`
-
-**Warning**: This has no authentication. Only use on trusted networks.
-
-### CORS Configuration
-
-If accessing from a different host and encountering CORS errors, you may need to modify CORS settings in `vam_tools/web/api.py`.
-
-## Performance Notes
-
-### Memory Usage
-- Catalog loaded entirely in memory
-- ~500 bytes per image record
-- 100k images ≈ 50 MB RAM
-- Perceptual hashes add ~32 bytes per image
-
-### Disk I/O
-- Sequential reads for file scanning
-- Random reads for checksum computation
-- Checkpoint writes every 100 files
-- Single final catalog write
-
-### Scalability
-- Linear scaling up to CPU core count
-- 20-30x speedup on 32-core systems
-- Tested with 100,000+ images
-- For >500k images, consider SQLite in future versions
-
-## What's Next
-
-### Planned Features
-
-**Organization Execution** (Phase 1):
-- Move files to YYYY-MM directory structure
-- Dry-run mode for safety
-- Rollback support
-- Checksum verification
-
-**Burst Detection** (Phase 2):
-- Group sequential images (burst mode, timelapse)
-- Auto-select best shots
-- Representative image selection
-
-**AI-Powered Curation** (Phase 3):
-- Scene detection
-- Face recognition
-- Object detection
-- Quality assessment (blur, exposure, composition)
-
-**Auto-Tagging** (Phase 3):
-- Location tags from GPS
-- Time-based tags (season, time of day)
-- Content tags (scene type, objects)
-- Technical tags (camera settings, lens type)
-- Quality tags (sharp, rule-of-thirds)
-
-See `REQUIREMENTS.md` for the complete roadmap.
-
-## Getting Help
-
-- **Documentation**: See `README.md` and `/docs` folder
-- **Issues**: [GitHub Issues](https://github.com/irjudson/lumina/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/irjudson/lumina/discussions)
+---
 
 ## Safety and Data Protection
 
-Lumina is designed with safety in mind:
-
-1. **Non-destructive by default**: Analysis phase never modifies source files
-2. **Checkpoint system**: Progress saved every 100 files (safe to interrupt)
-3. **File locking**: Prevents concurrent writes to catalog
-4. **Dry-run modes**: Test operations before execution
-5. **Atomic writes**: Catalog updates are atomic with backup
-6. **Read-only web UI**: Web interface can't modify files
-
-Your original files are never modified during the analysis phase. Future execution phases will require explicit confirmation for any file operations.
+- **Source files are never modified** during scanning, hashing, classification, or tagging
+- **Organization** requires explicit configuration of an output directory; the source is not touched
+- **Copy mode** (default for Organize) leaves originals in place; checksums verified at destination before updating the catalog
+- **Move mode** deletes the source only after a verified checksum match
+- **Dry run** previews any organize operation before executing it
+- **Rejected / archived** images remain on disk; only their status in the catalog changes
