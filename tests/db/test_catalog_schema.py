@@ -181,10 +181,11 @@ def test_images_table_structure(test_catalog_id):
         ).fetchone()
 
         assert result is not None
-        assert result[0] == "test_id"  # id
-        assert str(result[1]) == test_catalog_id  # catalog_id (UUID object)
-        assert result[2] == "/test/path.jpg"  # source_path
-        assert result[3] == "image"  # file_type
+        row = result._mapping
+        assert row["id"] == "test_id"
+        assert str(row["catalog_id"]) == test_catalog_id
+        assert row["source_path"] == "/test/path.jpg"
+        assert row["file_type"] == "image"
     finally:
         db.close()
 

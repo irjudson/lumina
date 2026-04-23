@@ -269,6 +269,58 @@ def has_active_job(catalog_id: str, job_type: str) -> bool:
         return False
 
 
+def _trigger_chained_jobs(job_id: str, ctx: JobContext) -> None:
+    """After a job succeeds, submit any jobs that were chained to run after it."""
+    try:
+        with get_db_context() as db:
+            job = db.query(Job).filter(Job.id == job_id).first()
+            if not job or not job.parameters:
+                return
+            chained = job.parameters.get("_chained_jobs", [])
+
+        if not chained:
+            return
+
+        from .job_implementations import JOB_FUNCTIONS  # lazy import to avoid circular
+
+        for spec in chained:
+            job_type = spec.get("job_type")
+            catalog_id = spec.get("catalog_id", ctx.catalog_id)
+            params = spec.get("parameters", {})
+            source = spec.get("job_source", "user")
+            priority = spec.get("priority", 100)
+            trigger = spec.get("warehouse_trigger")
+
+            if job_type not in JOB_FUNCTIONS:
+                logger.warning(f"Chained job type '{job_type}' not found, skipping")
+                continue
+
+            with get_db_context() as db:
+                chained_job = create_job(
+                    db,
+                    job_type=job_type,
+                    catalog_id=catalog_id,
+                    parameters=params,
+                    job_source=source,
+                    priority=priority,
+                    warehouse_trigger=trigger,
+                )
+                chained_job_id = chained_job.id
+
+            logger.info(
+                f"Triggering chained job {job_type} (id={chained_job_id}) after {job_id}"
+            )
+            run_job_in_background(
+                job_id=chained_job_id,
+                catalog_id=catalog_id,
+                func=JOB_FUNCTIONS[job_type],
+                parameters=params,
+            )
+
+    except Exception as e:
+        logger.error(f"Failed to trigger chained jobs after {job_id}: {e}")
+
+
 def run_job_in_background(
     job_id: str,
     catalog_id: str,
@@ -321,6 +373,10 @@ def run_job_in_background(
                 return None
 
             update_job_status(job_id, "SUCCESS", result=result or {})
+
+            # Trigger any chained jobs that were waiting on this one
+            _trigger_chained_jobs(job_id, ctx)
+
             return result
 
         except Exception as e:

@@ -505,10 +505,14 @@ def test_bktree_finds_neighbors_within_distance():
 def test_l5_near_duplicate_finds_similar():
     from lumina.analysis.dedup.layers.l5_near_duplicate import detect_near_duplicates
 
+    # dhash_16 is 256-bit = 64 hex chars; avoid all-zeros (treated as degenerate)
+    base = "a" * 64
+    near = "a" * 63 + "b"  # differs by 1 bit (a=1010, b=1011)
+    far = "f" * 64  # totally different
     images = [
-        {"id": "img-1", "dhash": "0000000000000000"},
-        {"id": "img-2", "dhash": "0000000000000001"},  # 1 bit diff
-        {"id": "img-3", "dhash": "ffffffffffffffff"},  # totally different
+        {"id": "img-1", "dhash_16": base},
+        {"id": "img-2", "dhash_16": near},
+        {"id": "img-3", "dhash_16": far},
     ]
     pairs = list(detect_near_duplicates(images, threshold=4))
     assert len(pairs) == 1
@@ -531,13 +535,16 @@ def test_bktree_boundary_is_inclusive():
 
 
 def test_l5_skips_images_without_dhash():
-    """Images missing a dhash field are silently excluded from the BK-tree."""
+    """Images missing a dhash_16 field are silently excluded from the BK-tree."""
     from lumina.analysis.dedup.layers.l5_near_duplicate import detect_near_duplicates
 
+    # dhash_16 is 256-bit = 64 hex chars; use non-zero hashes (zeros are degenerate)
+    base = "a" * 64
+    near = "a" * 63 + "b"  # 1 bit from base
     images = [
-        {"id": "img-1", "dhash": "0000000000000000"},
-        {"id": "img-2", "dhash": None},  # no hash — should be skipped
-        {"id": "img-3", "dhash": "0000000000000001"},  # 1 bit from img-1
+        {"id": "img-1", "dhash_16": base},
+        {"id": "img-2", "dhash_16": None},  # no hash — should be skipped
+        {"id": "img-3", "dhash_16": near},
     ]
     pairs = list(detect_near_duplicates(images, threshold=4))
     pair_ids = [{p.image_id_a, p.image_id_b} for p in pairs]

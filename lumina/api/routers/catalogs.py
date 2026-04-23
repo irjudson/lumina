@@ -288,6 +288,23 @@ def list_catalog_images(
     include_tags: bool = Query(
         False, description="Include tags array in each image response"
     ),
+    # Content class filter
+    content_class: str = Query(
+        None,
+        description="Filter by content class: photo, screenshot, document, social_media, artwork, other. Prefix with ! to exclude (e.g. !screenshot,!document)",
+    ),
+    # Size filter
+    min_size_bytes: int = Query(None, description="Minimum file size in bytes"),
+    max_size_bytes: int = Query(None, description="Maximum file size in bytes"),
+    # Status filter
+    status: str = Query(
+        None,
+        description="Filter by specific status: active, rejected, archived, flagged. Overrides include_archived.",
+    ),
+    include_archived: bool = Query(
+        False,
+        description="Include rejected and archived images (default: hidden)",
+    ),
     # Sorting
     sort_by: str = "date",  # date, filename, size, created_at
     sort_order: str = "desc",  # asc or desc
@@ -440,6 +457,41 @@ def list_catalog_images(
                 )
                 params["tag_names"] = tag_list
 
+    # Content class filter
+    if content_class:
+        include_classes = []
+        exclude_classes = []
+        for part in content_class.split(","):
+            part = part.strip()
+            if part.startswith("!"):
+                exclude_classes.append(part[1:])
+            else:
+                include_classes.append(part)
+        if include_classes:
+            conditions.append("content_class = ANY(:include_classes)")
+            params["include_classes"] = include_classes
+        if exclude_classes:
+            conditions.append(
+                "(content_class IS NULL OR content_class != ALL(:exclude_classes))"
+            )
+            params["exclude_classes"] = exclude_classes
+
+    # Size filters
+    if min_size_bytes is not None:
+        conditions.append("size_bytes >= :min_size_bytes")
+        params["min_size_bytes"] = min_size_bytes
+    if max_size_bytes is not None:
+        conditions.append("size_bytes <= :max_size_bytes")
+        params["max_size_bytes"] = max_size_bytes
+
+    # Status filter
+    valid_statuses = {"active", "rejected", "archived", "flagged"}
+    if status and status in valid_statuses:
+        conditions.append("status_id = :status_filter")
+        params["status_filter"] = status
+    elif not include_archived:
+        conditions.append("status_id NOT IN ('rejected', 'archived')")
+
     # Build ORDER BY clause
     order_direction = "DESC" if sort_order.lower() == "desc" else "ASC"
     order_clauses = {
@@ -466,7 +518,8 @@ def list_catalog_images(
             thumbnail_path,
             status_id,
             created_at,
-            updated_at
+            updated_at,
+            content_class
         FROM images
         WHERE {where_clause}
         ORDER BY {order_by}
@@ -500,6 +553,7 @@ def list_catalog_images(
             "updated_at": (
                 row_dict["updated_at"].isoformat() if row_dict["updated_at"] else None
             ),
+            "content_class": row_dict.get("content_class"),
         }
         images.append(image_data)
         image_ids.append(row_dict["id"])
@@ -1611,23 +1665,54 @@ def get_smart_counts(
                 GROUP BY image_id
             ) tag_count ON tag_count.image_id = i.id
             WHERE i.catalog_id = :catalog_id
+              AND i.status_id NOT IN ('rejected', 'archived')
         ),
         burst_count AS (
             SELECT COUNT(*) AS cnt FROM bursts WHERE catalog_id = :catalog_id
         ),
         duplicate_count AS (
-            SELECT COUNT(DISTINCT id) AS cnt
-            FROM duplicate_groups
+            SELECT COUNT(*) AS cnt
+            FROM duplicate_candidates
+            WHERE catalog_id = CAST(:catalog_id AS uuid)
+              AND reviewed_at IS NULL
+        ),
+        non_photo_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM images
             WHERE catalog_id = :catalog_id
+              AND status_id NOT IN ('rejected', 'archived')
+              AND content_class = ANY(ARRAY['invalid','screenshot','document','social_media','artwork'])
+        ),
+        rejected_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM images
+            WHERE catalog_id = :catalog_id
+              AND status_id = 'rejected'
+        ),
+        needs_review_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM images
+            WHERE catalog_id = :catalog_id
+              AND status_id = 'flagged'
+        ),
+        event_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM events
+            WHERE catalog_id = CAST(:catalog_id AS uuid)
         )
         SELECT
             ic.recent,
             ic.videos,
             ic.geotagged,
             ic.untagged,
-            bc.cnt  AS bursts,
-            dc.cnt  AS duplicates
-        FROM image_counts ic, burst_count bc, duplicate_count dc
+            bc.cnt   AS bursts,
+            dc.cnt   AS duplicates,
+            npc.cnt  AS non_photo,
+            rc.cnt   AS rejected,
+            nrc.cnt  AS needs_review,
+            ec.cnt   AS events
+        FROM image_counts ic, burst_count bc, duplicate_count dc, non_photo_count npc,
+             rejected_count rc, needs_review_count nrc, event_count ec
         """
     )
 
@@ -1640,6 +1725,12 @@ def get_smart_counts(
         "geotagged": int(row.geotagged) if row and row.geotagged is not None else 0,
         "bursts": int(row.bursts) if row and row.bursts is not None else 0,
         "duplicates": int(row.duplicates) if row and row.duplicates is not None else 0,
+        "non_photo": int(row.non_photo) if row and row.non_photo is not None else 0,
+        "rejected": int(row.rejected) if row and row.rejected is not None else 0,
+        "needs_review": (
+            int(row.needs_review) if row and row.needs_review is not None else 0
+        ),
+        "events": int(row.events) if row and row.events is not None else 0,
     }
 
 
@@ -2492,7 +2583,7 @@ def export_images(
 def start_burst_detection(
     catalog_id: uuid.UUID,
     gap_threshold: float = Query(
-        2.0, ge=0.1, le=30.0, description="Max seconds between burst images"
+        1.0, ge=0.1, le=30.0, description="Max seconds between burst images"
     ),
     min_burst_size: int = Query(
         3, ge=2, le=20, description="Minimum images to form a burst"
@@ -3074,6 +3165,73 @@ def batch_apply_burst_selections(
 
 
 # ============================================================================
+# Burst dissolution endpoints
+# ============================================================================
+
+
+@router.delete("/{catalog_id}/bursts/{burst_id}")
+def dissolve_burst(
+    catalog_id: uuid.UUID,
+    burst_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Dissolve an entire burst — clears burst_id on all member images, deletes the burst record."""
+    get_catalog(catalog_id, db)
+    burst = db.execute(
+        text(
+            "SELECT id FROM bursts WHERE id = CAST(:bid AS uuid) AND catalog_id = CAST(:cid AS uuid)"
+        ),
+        {"bid": str(burst_id), "cid": str(catalog_id)},
+    ).fetchone()
+    if not burst:
+        raise HTTPException(status_code=404, detail="Burst not found")
+
+    db.execute(
+        text("UPDATE images SET burst_id = NULL WHERE burst_id = CAST(:bid AS uuid)"),
+        {"bid": str(burst_id)},
+    )
+    db.execute(
+        text("DELETE FROM bursts WHERE id = CAST(:bid AS uuid)"),
+        {"bid": str(burst_id)},
+    )
+    db.commit()
+    return {"dissolved": str(burst_id)}
+
+
+@router.delete("/{catalog_id}/bursts/{burst_id}/images/{image_id}")
+def remove_image_from_burst(
+    catalog_id: uuid.UUID,
+    burst_id: uuid.UUID,
+    image_id: str,
+    db: Session = Depends(get_db),
+):
+    """Remove one image from a burst. If it was the last member, dissolves the burst too."""
+    get_catalog(catalog_id, db)
+    db.execute(
+        text(
+            "UPDATE images SET burst_id = NULL"
+            " WHERE id = :iid AND burst_id = CAST(:bid AS uuid)"
+            " AND catalog_id = CAST(:cid AS uuid)"
+        ),
+        {"iid": image_id, "bid": str(burst_id), "cid": str(catalog_id)},
+    )
+
+    # Check if any members remain
+    remaining = db.execute(
+        text("SELECT COUNT(*) FROM images WHERE burst_id = CAST(:bid AS uuid)"),
+        {"bid": str(burst_id)},
+    ).scalar()
+
+    if remaining == 0:
+        db.execute(
+            text("DELETE FROM bursts WHERE id = CAST(:bid AS uuid)"),
+            {"bid": str(burst_id)},
+        )
+
+    db.commit()
+    return {"removed": image_id, "burst_dissolved": remaining == 0}
+
+
 # Edit Mode Endpoints
 # ============================================================================
 
@@ -3283,6 +3441,80 @@ def get_image_edit_data(
         }
 
     return edit_data
+
+
+@router.post("/{catalog_id}/images/bulk-status")
+def bulk_update_image_status(
+    catalog_id: uuid.UUID,
+    body: Dict[str, Any],
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Set status for multiple images at once.
+
+    Body: { "image_ids": [...], "status": "rejected" | "active" | "archived" | "flagged" }
+    """
+    get_catalog(catalog_id, db)
+    image_ids = body.get("image_ids", [])
+    status = body.get("status", "rejected")
+    valid_statuses = {"active", "rejected", "archived", "flagged"}
+    if status not in valid_statuses:
+        raise HTTPException(
+            status_code=422, detail=f"status must be one of {valid_statuses}"
+        )
+    if not image_ids:
+        return {"updated": 0}
+
+    result = db.execute(
+        text(
+            """
+            UPDATE images
+            SET status_id = :status
+            WHERE catalog_id = :cid
+              AND id = ANY(:ids)
+        """
+        ),
+        {"status": status, "cid": str(catalog_id), "ids": image_ids},
+    )
+    updated = result.rowcount
+
+    # Auto-resolve any duplicate pairs that include a rejected/archived image
+    if status in ("rejected", "archived") and image_ids:
+        db.execute(
+            text(
+                """
+                UPDATE duplicate_candidates
+                SET reviewed_at = NOW()
+                WHERE catalog_id = CAST(:cid AS uuid)
+                  AND reviewed_at IS NULL
+                  AND (image_id_a = ANY(:ids) OR image_id_b = ANY(:ids))
+            """
+            ),
+            {"cid": str(catalog_id), "ids": image_ids},
+        )
+
+    db.commit()
+    return {"updated": updated}
+
+
+@router.post("/{catalog_id}/images/restore-all-rejected")
+def restore_all_rejected_images(
+    catalog_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Restore all images with status 'rejected' back to 'active'."""
+    get_catalog(catalog_id, db)
+    result = db.execute(
+        text(
+            """
+            UPDATE images
+            SET status_id = 'active'
+            WHERE catalog_id = :cid AND status_id = 'rejected'
+        """
+        ),
+        {"cid": str(catalog_id)},
+    )
+    db.commit()
+    return {"restored": result.rowcount}
 
 
 @router.put("/{catalog_id}/images/{image_id}/edit")
@@ -3584,3 +3816,186 @@ def export_xmp_sidecar(
     except Exception as e:
         logger.error(f"Error writing XMP file {xmp_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Error writing XMP file: {e}")
+
+
+# ---------------------------------------------------------------------------
+# File Organization
+# ---------------------------------------------------------------------------
+
+
+class OrganizePreviewResponse(BaseModel):
+    """Response from the organize preview (dry-run) endpoint."""
+
+    summary: dict
+    exceptions: list
+    dry_run: bool = True
+
+
+@router.post("/{catalog_id}/organize/preview", response_model=OrganizePreviewResponse)
+def preview_organize(
+    catalog_id: str,
+    scope: str = "new",
+    db: Session = Depends(get_db),
+):
+    """
+    Preview file reorganization without moving any files.
+
+    Returns summary stats and an exceptions list (iffy dates, unresolved,
+    collisions) so the user can review before committing.
+
+    scope: "new" (default) | "iffy" | "unresolved" | "all" | "skip_pending_duplicates"
+    """
+    from pathlib import Path
+
+    from sqlalchemy import text
+
+    from ...db.models import Catalog, Image
+    from ...jobs.definitions.organize import _plan_organization
+
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+    if not catalog.organized_directory:
+        raise HTTPException(
+            status_code=400,
+            detail="Catalog has no organized_directory configured.",
+        )
+
+    images = db.query(Image).filter(Image.catalog_id == catalog_id).all()
+    output_dir = Path(catalog.organized_directory)
+
+    # Collect image IDs with unreviewed duplicate candidates
+    pending_rows = db.execute(
+        text(
+            """
+            SELECT DISTINCT unnest(ARRAY[image_id_a::text, image_id_b::text]) AS image_id
+            FROM duplicate_candidates
+            WHERE catalog_id = CAST(:cid AS uuid) AND reviewed_at IS NULL
+        """
+        ),
+        {"cid": catalog_id},
+    ).fetchall()
+    pending_duplicate_ids = {row.image_id for row in pending_rows}
+
+    # Total bytes of images already confirmed as duplicates (archived) — advisory only
+    confirmed_size_row = db.execute(
+        text(
+            """
+            SELECT COALESCE(SUM(i.size_bytes), 0) AS total
+            FROM images i
+            WHERE i.catalog_id = CAST(:cid AS uuid) AND i.status_id = 'archived'
+        """
+        ),
+        {"cid": catalog_id},
+    ).fetchone()
+    confirmed_duplicate_size_bytes = (
+        int(confirmed_size_row.total) if confirmed_size_row else 0
+    )
+
+    plan = _plan_organization(
+        images,
+        output_dir,
+        scope,
+        pending_duplicate_ids=pending_duplicate_ids,
+        confirmed_duplicate_size_bytes=confirmed_duplicate_size_bytes,
+    )
+
+    return OrganizePreviewResponse(
+        summary=plan["summary"],
+        exceptions=plan["exceptions"],
+        dry_run=True,
+    )
+
+
+# --- Events ---
+
+
+@router.get("/{catalog_id}/events")
+def list_events(
+    catalog_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """List detected events for a catalog, sorted by score descending."""
+    total_row = db.execute(
+        text("SELECT COUNT(*) FROM events WHERE catalog_id = CAST(:cid AS uuid)"),
+        {"cid": catalog_id},
+    ).scalar()
+
+    rows = db.execute(
+        text(
+            """
+            SELECT id, name, start_time, end_time, duration_minutes,
+                   image_count, center_lat, center_lon, radius_km, score, detected_at
+            FROM events
+            WHERE catalog_id = CAST(:cid AS uuid)
+            ORDER BY score DESC
+            LIMIT :limit OFFSET :offset
+        """
+        ),
+        {"cid": catalog_id, "limit": limit, "offset": offset},
+    ).fetchall()
+
+    events = []
+    for r in rows:
+        events.append(
+            {
+                "id": str(r.id),
+                "name": r.name,
+                "start_time": r.start_time.isoformat() if r.start_time else None,
+                "end_time": r.end_time.isoformat() if r.end_time else None,
+                "duration_minutes": r.duration_minutes,
+                "image_count": r.image_count,
+                "center_lat": r.center_lat,
+                "center_lon": r.center_lon,
+                "radius_km": r.radius_km,
+                "score": r.score,
+                "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+            }
+        )
+
+    return {"events": events, "total": total_row or 0}
+
+
+@router.get("/{catalog_id}/events/{event_id}/images")
+def list_event_images(
+    catalog_id: str,
+    event_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """List images belonging to a specific event."""
+    rows = db.execute(
+        text(
+            """
+            SELECT i.id, i.source_path, i.file_type,
+                   (i.metadata->>'latitude')::double precision AS lat,
+                   (i.metadata->>'longitude')::double precision AS lon,
+                   i.metadata->>'photo_date' AS photo_date
+            FROM event_images ei
+            JOIN images i ON i.id = ei.image_id
+            WHERE ei.event_id = CAST(:eid AS uuid)
+              AND i.catalog_id = CAST(:cid AS uuid)
+            ORDER BY photo_date ASC
+            LIMIT :limit OFFSET :offset
+        """
+        ),
+        {"eid": event_id, "cid": catalog_id, "limit": limit, "offset": offset},
+    ).fetchall()
+
+    images = []
+    for r in rows:
+        images.append(
+            {
+                "id": r.id,
+                "source_path": r.source_path,
+                "file_type": r.file_type,
+                "lat": r.lat,
+                "lon": r.lon,
+                "photo_date": r.photo_date,
+            }
+        )
+
+    return {"images": images, "total": len(images)}

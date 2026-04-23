@@ -2039,7 +2039,7 @@ async def update_burst(catalog_id: str, burst_id: str, data: dict):
 @app.post("/api/catalogs/{catalog_id}/detect-bursts", status_code=202)
 async def start_burst_detection(
     catalog_id: str,
-    gap_threshold: float = 2.0,
+    gap_threshold: float = 1.0,
     min_burst_size: int = 3,
 ):
     """Start burst detection job.

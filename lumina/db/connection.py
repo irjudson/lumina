@@ -72,6 +72,24 @@ def init_db() -> None:
     upgrade(engine)
     logger.info("Dedup schema migration applied")
 
+    # Run organized_path migration (idempotent)
+    from .migrations.organized_path import upgrade as upgrade_organized_path
+
+    upgrade_organized_path(engine)
+    logger.info("Organized path migration applied")
+
+    # Run content_class migration (idempotent)
+    from .migrations.content_class import upgrade as upgrade_content_class
+
+    upgrade_content_class(engine)
+    logger.info("Content class migration applied")
+
+    # Run events schema migration (idempotent)
+    from .migrations.events_schema import upgrade as upgrade_events
+
+    upgrade_events(engine)
+    logger.info("Events schema migration applied")
+
     # Populate reference tables
     db = SessionLocal()
     try:
