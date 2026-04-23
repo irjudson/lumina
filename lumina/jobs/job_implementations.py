@@ -301,7 +301,7 @@ def detect_bursts_job(ctx: JobContext) -> Dict[str, Any]:
 
     try:
         # Parameters
-        gap_threshold = ctx.get("gap_threshold", 2.0)
+        gap_threshold = ctx.get("gap_threshold", 1.0)
         min_burst_size = ctx.get("min_burst_size", 3)
 
         with CatalogDatabase(ctx.catalog_id) as catalog_db:
@@ -1261,7 +1261,737 @@ def _run_framework_job(ctx: "JobContext", job_name: str) -> Dict[str, Any]:
     return executor.run(ctx.job_id, ctx.catalog_id, **ctx.parameters)
 
 
+def organize_job(ctx: JobContext) -> Dict[str, Any]:
+    """Reorganize catalog files into the catalog's organized_directory.
+
+    Parameters (via ctx.parameters):
+        operation: "copy" (default) or "move"
+        dry_run: bool — if True, plan only, no filesystem changes (default False)
+        scope: "new" (default), "iffy", "unresolved", or "all"
+
+    Returns:
+        summary: count breakdown
+        exceptions: list of items needing attention (iffy, unresolved, collision, error)
+        dry_run: whether this was a preview-only run
+    """
+    from pathlib import Path
+
+    from ..db import get_db_context
+    from ..db.models import Catalog, Image
+    from ..jobs.definitions.organize import _plan_organization
+    from ..shared.media_utils import compute_checksum
+
+    operation = ctx.get("operation", "copy")
+    dry_run = ctx.get("dry_run", False)
+    scope = ctx.get("scope", "new")
+
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 0, "total": 100, "percent": 0, "phase": "loading"},
+    )
+
+    # Load catalog and validate organized_directory
+    with get_db_context() as db:
+        catalog = db.query(Catalog).filter(Catalog.id == ctx.catalog_id).first()
+        if not catalog:
+            raise ValueError(f"Catalog {ctx.catalog_id} not found")
+        if not catalog.organized_directory:
+            raise ValueError(
+                "Catalog has no organized_directory configured. "
+                "Set it in catalog settings before organizing."
+            )
+        output_dir = Path(catalog.organized_directory)
+
+    # Query images based on scope
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 5, "total": 100, "percent": 5, "phase": "discovering"},
+    )
+
+    with get_db_context() as db:
+        query = db.query(Image).filter(Image.catalog_id == ctx.catalog_id)
+        images = query.all()
+
+    # Build organization plan
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 10, "total": 100, "percent": 10, "phase": "planning"},
+    )
+
+    plan = _plan_organization(images, output_dir, scope)
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "summary": plan["summary"],
+            "exceptions": plan["exceptions"],
+        }
+
+    # Execute file operations
+    operations = plan["operations"]
+    total_ops = len(operations)
+    organized = 0
+    errors = []
+
+    import shutil
+
+    for i, op in enumerate(operations):
+        if should_stop_job(ctx.job_id):
+            break
+
+        percent = 10 + int((i / max(total_ops, 1)) * 85)
+        update_job_status(
+            ctx.job_id,
+            "PROGRESS",
+            progress={
+                "current": i,
+                "total": total_ops,
+                "percent": percent,
+                "phase": "organizing",
+                "message": f"Organizing {i + 1}/{total_ops}",
+            },
+        )
+
+        source = Path(op["source_path"])
+        dest = Path(op["dest_path"])
+
+        if not source.exists():
+            errors.append(
+                {"image_id": op["image_id"], "error": f"Source not found: {source}"}
+            )
+            continue
+
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+
+            if operation == "copy":
+                shutil.copy2(str(source), str(dest))
+            else:
+                shutil.move(str(source), str(dest))
+
+            # Checksum verification
+            dest_checksum = compute_checksum(dest)
+            with get_db_context() as db:
+                image = db.query(Image).filter(Image.id == op["image_id"]).first()
+                if image:
+                    if image.checksum != dest_checksum:
+                        dest.unlink(missing_ok=True)
+                        raise ValueError(f"Checksum mismatch after {operation}")
+                    image.organized_path = str(dest)
+                    flags = dict(image.processing_flags or {})
+                    flags["organized"] = True
+                    flags["organization_confidence"] = op["tier"]
+                    image.processing_flags = flags
+                    db.commit()
+
+            organized += 1
+
+        except Exception as e:
+            logger.error(f"Error organizing {source}: {e}")
+            errors.append({"image_id": op["image_id"], "error": str(e)})
+
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 100, "total": 100, "percent": 100, "phase": "finalizing"},
+    )
+
+    return {
+        "dry_run": False,
+        "summary": {
+            **plan["summary"],
+            "organized": organized,
+            "errors": len(errors),
+        },
+        "exceptions": plan["exceptions"],
+        "error_details": errors,
+    }
+
+
+def auto_resolve_duplicates_job(ctx: Any) -> Dict[str, Any]:
+    """Auto-resolve duplicate candidates using deterministic quality rules.
+
+    For each unreviewed candidate with hamming=0 (pixel-identical content):
+      1. Higher resolution wins
+      2. Larger file wins (better quality/less compression) if same dims
+      3. Better filename wins if files are otherwise equal
+      4. format_variant layer: higher format tier wins (RAW > TIFF > HEIC > JPEG)
+
+    Writes proper duplicate_decisions + suppression_pairs + archives the loser,
+    identical to a manual user decision.
+
+    Parameters:
+        layers: list of layers to process (default: ["near_duplicate", "format_variant"])
+        dry_run: if True, count decisions without writing them (default: False)
+        batch_size: commit frequency (default: 500)
+    """
+    import os
+    import re
+    import uuid as uuid_mod
+
+    from sqlalchemy import text as sa_text
+
+    from ..analysis.dedup.archive import archive_image
+    from ..db.connection import get_db_context
+
+    layers = ctx.get("layers", ["near_duplicate", "format_variant"])
+    dry_run = ctx.get("dry_run", False)
+    batch_size = ctx.get("batch_size", 500)
+
+    FORMAT_TIER = {
+        "RAW": 100,
+        "TIFF": 80,
+        "HEIC": 60,
+        "HEIF": 60,
+        "JPEG": 50,
+        "JPG": 50,
+        "PNG": 45,
+        "GIF": 10,
+    }
+
+    def filename_score(path: str) -> int:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        score = 0
+        if re.search(r"20\d{2}[_\-]?\d{4}", stem):
+            score += 3
+        if re.search(r"\d{8}", stem):
+            score += 2
+        if len(stem) > 12:
+            score += 1
+        if re.match(r"^(IMG|DSC|DSCF|MVI|MOV|VID|P\d+|image)[-_]?\d+$", stem, re.I):
+            score -= 2
+        if re.match(r"^\d{4,8}$", stem):
+            score -= 1
+        return score
+
+    def pick_primary(row) -> tuple[str, str]:
+        """Return (primary_id, reason) — primary is the one to KEEP."""
+        pid_a, pid_b = str(row.image_id_a), str(row.image_id_b)
+
+        # For format_variant: prefer higher format tier
+        if row.layer == "format_variant":
+            tier_a = FORMAT_TIER.get((row.format_a or "").upper(), 40)
+            tier_b = FORMAT_TIER.get((row.format_b or "").upper(), 40)
+            if tier_a != tier_b:
+                return (pid_a if tier_a > tier_b else pid_b, "format_tier")
+
+        # Higher resolution wins
+        pixels_a = (row.width_a or 0) * (row.height_a or 0)
+        pixels_b = (row.width_b or 0) * (row.height_b or 0)
+        if pixels_a != pixels_b:
+            return (pid_a if pixels_a > pixels_b else pid_b, "resolution")
+
+        # Larger file wins (better compression = more data retained)
+        size_a, size_b = row.size_a or 0, row.size_b or 0
+        size_ratio = abs(size_a - size_b) / max(size_a, size_b, 1)
+        if size_ratio > 0.05:  # >5% difference is meaningful
+            return (pid_a if size_a > size_b else pid_b, "file_size")
+
+        # Better filename wins
+        fn_a = filename_score(row.path_a or "")
+        fn_b = filename_score(row.path_b or "")
+        if fn_a != fn_b:
+            return (pid_a if fn_a > fn_b else pid_b, "filename")
+
+        # Tiebreak: larger file
+        return (pid_a if size_a >= size_b else pid_b, "tiebreak_size")
+
+    # Load all unreviewed candidates for eligible layers
+    with get_db_context() as db:
+        placeholders = ", ".join(f"'{layer}'" for layer in layers)
+        candidates = db.execute(
+            sa_text(
+                f"""
+            SELECT
+                dc.id, dc.catalog_id, dc.image_id_a, dc.image_id_b,
+                dc.layer, dc.confidence, dc.detection_meta,
+                ia.source_path AS path_a, ia.size_bytes AS size_a,
+                ia.width AS width_a, ia.height AS height_a, ia.format AS format_a,
+                ib.source_path AS path_b, ib.size_bytes AS size_b,
+                ib.width AS width_b, ib.height AS height_b, ib.format AS format_b
+            FROM duplicate_candidates dc
+            JOIN images ia ON ia.id = dc.image_id_a
+            JOIN images ib ON ib.id = dc.image_id_b
+            WHERE dc.catalog_id = CAST(:cid AS uuid)
+              AND dc.reviewed_at IS NULL
+              AND dc.layer IN ({placeholders})
+              AND (dc.detection_meta->>'hamming')::int = 0
+        """
+            ),
+            {"cid": str(ctx.catalog_id)},
+        ).fetchall()
+
+    total = len(candidates)
+    resolved = 0
+    skipped = 0
+    reasons: Dict[str, int] = {}
+
+    for i, row in enumerate(candidates):
+        if should_stop_job(ctx.job_id):
+            break
+
+        try:
+            primary_id, reason = pick_primary(row)
+            reasons[reason] = reasons.get(reason, 0) + 1
+
+            if not dry_run:
+                decision_id = str(uuid_mod.uuid4())
+                with get_db_context() as db:
+                    # 1. Write decision
+                    db.execute(
+                        sa_text(
+                            """
+                        INSERT INTO duplicate_decisions
+                            (id, candidate_id, decision, primary_id, notes, decided_at)
+                        VALUES (CAST(:id AS uuid), CAST(:cid AS uuid),
+                                'confirmed_duplicate', :primary_id,
+                                :notes, NOW())
+                    """
+                        ),
+                        {
+                            "id": decision_id,
+                            "cid": str(row.id),
+                            "primary_id": primary_id,
+                            "notes": f"auto-resolved: {reason}",
+                        },
+                    )
+
+                    # 2. Mark reviewed
+                    db.execute(
+                        sa_text(
+                            "UPDATE duplicate_candidates SET reviewed_at = NOW() WHERE id = CAST(:id AS uuid)"
+                        ),
+                        {"id": str(row.id)},
+                    )
+
+                    # 3. Suppress pair
+                    id_a = min(str(row.image_id_a), str(row.image_id_b))
+                    id_b = max(str(row.image_id_a), str(row.image_id_b))
+                    db.execute(
+                        sa_text(
+                            """
+                        INSERT INTO suppression_pairs (id_a, id_b, decision, created_at)
+                        VALUES (:a, :b, 'confirmed_duplicate', NOW())
+                        ON CONFLICT (id_a, id_b) DO NOTHING
+                    """
+                        ),
+                        {"a": id_a, "b": id_b},
+                    )
+
+                    # 4. Archive the loser
+                    archive_id = (
+                        str(row.image_id_b)
+                        if str(row.image_id_b) != primary_id
+                        else str(row.image_id_a)
+                    )
+                    archive_image(
+                        image_id=archive_id,
+                        decision_id=decision_id,
+                        archive_reason=row.layer,
+                        primary_image_id=primary_id,
+                        session=db,
+                    )
+                    db.commit()
+
+            resolved += 1
+        except Exception as e:
+            logger.warning(f"Failed to resolve candidate {row.id}: {e}")
+            skipped += 1
+
+        if (i + 1) % batch_size == 0 or i == total - 1:
+            pct = int((i + 1) / total * 100)
+            update_job_status(
+                ctx.job_id,
+                "PROGRESS",
+                progress={
+                    "current": i + 1,
+                    "total": total,
+                    "percent": pct,
+                    "message": f"{'[dry run] ' if dry_run else ''}Resolved {resolved}/{total}",
+                },
+            )
+
+    return {
+        "resolved": resolved,
+        "skipped": skipped,
+        "total_eligible": total,
+        "dry_run": dry_run,
+        "reasons": reasons,
+    }
+
+
+def classify_images_job(ctx: Any) -> Dict[str, Any]:
+    """Classify images by content type using fast heuristics + optional Ollama VLM.
+
+    Tier 1 (heuristics, runs on all images, very fast):
+      - PIL validation: marks unreadable files as 'invalid'
+      - Tiny images (<= 64px) as 'invalid'
+      - Exact device screen dimensions as 'screenshot'
+      - Extreme aspect ratios as 'screenshot'
+      - Animated GIFs as 'other'
+
+    Tier 2 (Ollama VLM, optional, only for images heuristics can't resolve):
+      - Only runs when use_vlm=True
+
+    Parameters:
+        model: Ollama model (default: qwen3-vl)
+        use_vlm: run VLM on images heuristics label 'unknown' (default: False)
+        reclassify: re-run on already-classified images (default: False)
+        batch_size: DB commit frequency (default: 500)
+    """
+    from sqlalchemy import text as sa_text
+
+    from ..analysis.image_classifier import ImageClassifier, heuristic_classify
+
+    model = ctx.get("model", "qwen3-vl")
+    use_vlm = ctx.get("use_vlm", False)
+    reclassify = ctx.get("reclassify", False)
+    batch_size = ctx.get("batch_size", 500)
+
+    # Resolve the catalog's data root for thumbnail path resolution
+    catalog_root = Path(f"/app/catalogs/{ctx.catalog_id}")
+
+    classifier = ImageClassifier(model=model) if use_vlm else None
+
+    with CatalogDatabase(ctx.catalog_id) as catalog_db:
+        assert catalog_db.session is not None
+        where_clause = "" if reclassify else "AND content_class IS NULL"
+        rows = catalog_db.session.execute(
+            sa_text(
+                f"""
+                SELECT id, source_path, thumbnail_path
+                FROM images
+                WHERE catalog_id = CAST(:cid AS uuid)
+                  AND file_type = 'image'
+                  {where_clause}
+                ORDER BY id
+            """
+            ),
+            {"cid": str(ctx.catalog_id)},
+        ).fetchall()
+
+    total = len(rows)
+    if total == 0:
+        return {"classified": 0, "total": 0, "skipped": 0, "by_class": {}}
+
+    classified = 0
+    failed = 0
+    by_class: Dict[str, int] = {}
+    pending_updates: list = []
+
+    def flush(force: bool = False):
+        nonlocal classified
+        if not pending_updates or (not force and len(pending_updates) < batch_size):
+            return
+        with CatalogDatabase(ctx.catalog_id) as db2:
+            assert db2.session is not None
+            for img_id, label in pending_updates:
+                db2.session.execute(
+                    sa_text("UPDATE images SET content_class = :cls WHERE id = :id"),
+                    {"cls": label, "id": str(img_id)},
+                )
+            db2.session.commit()
+        classified += len(pending_updates)
+        pending_updates.clear()
+
+    for i, row in enumerate(rows):
+        img_id, source_path, thumbnail_path = row
+
+        if should_stop_job(ctx.job_id):
+            break
+
+        # Resolve paths: thumbnails are relative to catalog_root
+        path_to_use = None
+        if thumbnail_path:
+            p = catalog_root / thumbnail_path
+            if p.exists():
+                path_to_use = p
+        if path_to_use is None:
+            p = Path(source_path)
+            if p.exists():
+                path_to_use = p
+
+        if path_to_use is None:
+            failed += 1
+        else:
+            try:
+                label, _ = heuristic_classify(path_to_use)
+                if label == "unknown" and use_vlm and classifier:
+                    label = classifier.classify_with_vlm(path_to_use)
+                elif label == "unknown":
+                    label = "other"  # heuristics undecided, no VLM → leave as other
+                by_class[label] = by_class.get(label, 0) + 1
+                pending_updates.append((img_id, label))
+                flush()
+            except Exception as e:
+                logger.warning(f"Classification failed for {img_id}: {e}")
+                failed += 1
+
+        if (i + 1) % batch_size == 0 or i == total - 1:
+            flush(force=True)
+            pct = int((i + 1) / total * 100)
+            update_job_status(
+                ctx.job_id,
+                "PROGRESS",
+                progress={
+                    "current": i + 1,
+                    "total": total,
+                    "percent": pct,
+                    "message": f"Classified {classified + len(pending_updates)}/{total}",
+                },
+            )
+
+    flush(force=True)
+
+    return {
+        "classified": classified,
+        "failed": failed,
+        "total": total,
+        "use_vlm": use_vlm,
+        "by_class": by_class,
+    }
+
+
 # Job registry
+def detect_events_job(ctx: Any) -> Dict[str, Any]:
+    """Detect photographic events using time-space clustering.
+
+    Groups GPS-tagged images that are:
+    - Within max_radius_km of each other (default 0.402 km = 0.25 miles)
+    - Separated by no more than max_gap_hours between consecutive shots (default 2h)
+
+    Filters to events with >= min_images and >= min_duration_hours.
+    Score = images_per_hour (density) — higher means more event-like.
+    Clears previous event detection results before writing new ones.
+    """
+    import uuid as uuid_mod
+    from datetime import datetime
+    from math import atan2, cos, radians, sin, sqrt
+
+    from sqlalchemy import text
+
+    from ..db.connection import get_db_context
+
+    MIN_IMAGES: int = ctx.get("min_images", 10)
+    MIN_DURATION_H: float = ctx.get("min_duration_hours", 1.0)
+    MAX_RADIUS_KM: float = ctx.get("max_radius_km", 0.402)  # 0.25 miles
+    MAX_GAP_H: float = ctx.get("max_gap_hours", 2.0)
+
+    def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        R = 6371.0
+        dlat = radians(lat2 - lat1)
+        dlon = radians(lon2 - lon1)
+        a = (
+            sin(dlat / 2) ** 2
+            + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+        )
+        return R * 2 * atan2(sqrt(a), sqrt(1.0 - a))
+
+    def parse_dt(s: str) -> datetime:
+        # Handle both with/without timezone and various formats
+        s = s.strip()
+        for fmt in (
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
+            try:
+                return datetime.strptime(
+                    s[
+                        : len(
+                            fmt.replace("%f", "ffffff")
+                            .replace("%Y", "2000")
+                            .replace("%m", "01")
+                            .replace("%d", "01")
+                            .replace("%H", "00")
+                            .replace("%M", "00")
+                            .replace("%S", "00")
+                        )
+                    ],
+                    fmt,
+                )
+            except ValueError:
+                continue
+        raise ValueError(f"Cannot parse date: {s}")
+
+    catalog_id = str(ctx.catalog_id)
+
+    # --- Load GPS images sorted by date ---
+    with get_db_context() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT id, latitude, longitude,
+                    COALESCE(
+                        dates->>'selected_date',
+                        dates->>'exif_date',
+                        dates->>'filename_date',
+                        dates->>'filesystem_date'
+                    ) AS photo_date
+                FROM images
+                WHERE catalog_id = CAST(:cid AS uuid)
+                  AND latitude IS NOT NULL AND longitude IS NOT NULL
+                  AND status_id = 'active'
+                ORDER BY photo_date ASC NULLS LAST
+            """
+            ),
+            {"cid": catalog_id},
+        ).fetchall()
+
+    # Filter out nulls and parse dates
+    images = []
+    for r in rows:
+        if not r.photo_date:
+            continue
+        try:
+            dt = parse_dt(r.photo_date)
+            images.append((r.id, float(r.latitude), float(r.longitude), dt))
+        except (ValueError, TypeError):
+            continue
+
+    if not images:
+        return {"events_detected": 0, "images_clustered": 0}
+
+    logger.info(
+        f"Event detection: {len(images)} GPS images to cluster for catalog {catalog_id}"
+    )
+
+    # --- Build clusters: consecutive images connected if gap < MAX_GAP_H AND dist < MAX_RADIUS_KM ---
+    # Use Union-Find on sorted sequence: connect i → i+1 if within constraints
+    parent = list(range(len(images)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for i in range(1, len(images)):
+        _, lat_a, lon_a, dt_a = images[i - 1]
+        _, lat_b, lon_b, dt_b = images[i]
+        gap_h = (dt_b - dt_a).total_seconds() / 3600.0
+        if gap_h < 0 or gap_h > MAX_GAP_H:
+            continue
+        dist_km = haversine(lat_a, lon_a, lat_b, lon_b)
+        if dist_km <= MAX_RADIUS_KM:
+            union(i - 1, i)
+
+    # Group by cluster root
+    from collections import defaultdict
+
+    cluster_map: Dict[int, list] = defaultdict(list)
+    for i, img in enumerate(images):
+        cluster_map[find(i)].append(img)
+
+    # --- Score and filter clusters ---
+    events_to_write = []
+    for members in cluster_map.values():
+        if len(members) < MIN_IMAGES:
+            continue
+
+        members.sort(key=lambda x: x[3])  # sort by date within cluster
+        start_dt = members[0][3]
+        end_dt = members[-1][3]
+        duration_h = (end_dt - start_dt).total_seconds() / 3600.0
+
+        if duration_h < MIN_DURATION_H:
+            continue
+
+        lats = [m[1] for m in members]
+        lons = [m[2] for m in members]
+        center_lat = sum(lats) / len(lats)
+        center_lon = sum(lons) / len(lons)
+        radius_km = max(haversine(center_lat, center_lon, m[1], m[2]) for m in members)
+
+        # Score: images per hour — higher is denser/more event-like
+        # Bonus for tight radius, penalty for very long events
+        density = len(members) / max(duration_h, 0.25)
+        spatial_bonus = 1.0 / (1.0 + radius_km)
+        score = density * spatial_bonus
+
+        events_to_write.append(
+            {
+                "id": str(uuid_mod.uuid4()),
+                "catalog_id": catalog_id,
+                "start_time": start_dt,
+                "end_time": end_dt,
+                "duration_minutes": int(duration_h * 60),
+                "image_count": len(members),
+                "center_lat": center_lat,
+                "center_lon": center_lon,
+                "radius_km": radius_km,
+                "score": score,
+                "images": [m[0] for m in members],
+            }
+        )
+
+    events_to_write.sort(key=lambda e: e["score"], reverse=True)
+    logger.info(f"Event detection: {len(events_to_write)} events found before writing")
+
+    # --- Write to DB (clear old results first) ---
+    with get_db_context() as db:
+        db.execute(
+            text("DELETE FROM events WHERE catalog_id = CAST(:cid AS uuid)"),
+            {"cid": catalog_id},
+        )
+
+        for ev in events_to_write:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO events
+                        (id, catalog_id, start_time, end_time, duration_minutes,
+                         image_count, center_lat, center_lon, radius_km, score)
+                    VALUES
+                        (CAST(:id AS uuid), CAST(:cid AS uuid), :start, :end, :dur,
+                         :cnt, :lat, :lon, :rad, :score)
+                """
+                ),
+                {
+                    "id": ev["id"],
+                    "cid": catalog_id,
+                    "start": ev["start_time"],
+                    "end": ev["end_time"],
+                    "dur": ev["duration_minutes"],
+                    "cnt": ev["image_count"],
+                    "lat": ev["center_lat"],
+                    "lon": ev["center_lon"],
+                    "rad": ev["radius_km"],
+                    "score": ev["score"],
+                },
+            )
+            if ev["images"]:
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO event_images (event_id, image_id)
+                        VALUES (CAST(:eid AS uuid), :img_id)
+                        ON CONFLICT DO NOTHING
+                    """
+                    ),
+                    [{"eid": ev["id"], "img_id": img_id} for img_id in ev["images"]],
+                )
+
+        db.commit()
+
+    total_clustered = sum(e["image_count"] for e in events_to_write)
+    return {
+        "events_detected": len(events_to_write),
+        "images_clustered": total_clustered,
+        "gps_images_processed": len(images),
+    }
+
+
 JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "scan": scan_analyze_job,
     "analyze": scan_analyze_job,
@@ -1273,4 +2003,8 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "test": test_job,  # Test job for verification
     "hash_images_v2": lambda ctx: _run_framework_job(ctx, "hash_images_v2"),
     "detect_duplicates_v2": lambda ctx: _run_framework_job(ctx, "detect_duplicates_v2"),
+    "organize": organize_job,
+    "classify_images": classify_images_job,
+    "auto_resolve_duplicates": auto_resolve_duplicates_job,
+    "detect_events": detect_events_job,
 }

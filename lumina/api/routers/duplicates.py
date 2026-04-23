@@ -31,6 +31,9 @@ def list_candidates(
     min_confidence: float = 0.0,
     verify_carefully: Optional[bool] = None,
     reviewed: bool = False,
+    decision: Optional[
+        str
+    ] = None,  # filter by specific decision: not_duplicate, confirmed_duplicate, deferred
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -59,6 +62,13 @@ def list_candidates(
     else:
         filters.append("dc.reviewed_at IS NOT NULL")
 
+    # Filter by specific decision (joins duplicate_decisions)
+    decision_join = ""
+    if decision:
+        decision_join = "JOIN duplicate_decisions dd ON dd.candidate_id = dc.id"
+        filters.append("dd.decision = :decision")
+        params["decision"] = decision
+
     where = " AND ".join(filters)
 
     rows = db.execute(
@@ -73,10 +83,11 @@ def list_candidates(
                 ib.source_path AS path_b, ib.width AS width_b, ib.height AS height_b,
                 ib.format AS format_b, ib.size_bytes AS size_b
             FROM duplicate_candidates dc
+            {decision_join}
             JOIN images ia ON ia.id = dc.image_id_a
             JOIN images ib ON ib.id = dc.image_id_b
             WHERE {where}
-            ORDER BY dc.verify_carefully DESC, dc.confidence DESC
+            ORDER BY dc.reviewed_at DESC, dc.confidence DESC
             LIMIT :limit OFFSET :offset
         """
         ),
@@ -243,6 +254,115 @@ def decide_candidate(
     return {"decision_id": decision_id, "status": "recorded"}
 
 
+@router.delete("/{catalog_id}/duplicates/candidates/{candidate_id}/decide")
+def undo_decision(
+    catalog_id: uuid.UUID,
+    candidate_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Undo a duplicate decision — restores the candidate to pending review.
+
+    Does NOT un-archive images; that requires a separate action.
+    """
+    get_catalog(catalog_id, db)
+
+    candidate = db.execute(
+        text(
+            "SELECT * FROM duplicate_candidates WHERE id = CAST(:id AS uuid) AND catalog_id = CAST(:cid AS uuid)"
+        ),
+        {"id": str(candidate_id), "cid": str(catalog_id)},
+    ).fetchone()
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    # Delete the decision record(s)
+    db.execute(
+        text("DELETE FROM duplicate_decisions WHERE candidate_id = CAST(:cid AS uuid)"),
+        {"cid": str(candidate_id)},
+    )
+
+    # Remove suppression pair
+    id_a = min(str(candidate.image_id_a), str(candidate.image_id_b))
+    id_b = max(str(candidate.image_id_a), str(candidate.image_id_b))
+    db.execute(
+        text("DELETE FROM suppression_pairs WHERE id_a = :a AND id_b = :b"),
+        {"a": id_a, "b": id_b},
+    )
+
+    # Reset reviewed_at so it appears in pending queue again
+    db.execute(
+        text(
+            "UPDATE duplicate_candidates SET reviewed_at = NULL WHERE id = CAST(:id AS uuid)"
+        ),
+        {"id": str(candidate_id)},
+    )
+
+    db.commit()
+    return {"status": "undone", "candidate_id": str(candidate_id)}
+
+
+@router.delete("/{catalog_id}/duplicates/decisions")
+def bulk_undo_decisions(
+    catalog_id: uuid.UUID,
+    decision: str = "not_duplicate",
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Undo all decisions of a given type, returning candidates to pending review.
+
+    Does NOT un-archive images archived by confirmed_duplicate decisions.
+    """
+    VALID = {"not_duplicate", "deferred"}
+    if decision not in VALID:
+        raise HTTPException(status_code=422, detail=f"decision must be one of {VALID}")
+
+    get_catalog(catalog_id, db)
+
+    # Find all candidates in this catalog with the target decision
+    candidate_rows = db.execute(
+        text(
+            """
+            SELECT dc.id, dc.image_id_a, dc.image_id_b
+            FROM duplicate_candidates dc
+            JOIN duplicate_decisions dd ON dd.candidate_id = dc.id
+            WHERE dc.catalog_id = CAST(:cid AS uuid)
+              AND dd.decision = :decision
+        """
+        ),
+        {"cid": str(catalog_id), "decision": decision},
+    ).fetchall()
+
+    if not candidate_rows:
+        return {"undone": 0}
+
+    candidate_ids = [str(r.id) for r in candidate_rows]
+
+    # Delete decision records
+    db.execute(
+        text("DELETE FROM duplicate_decisions WHERE candidate_id = ANY(:ids::uuid[])"),
+        {"ids": candidate_ids},
+    )
+
+    # Delete suppression pairs
+    for row in candidate_rows:
+        id_a = min(str(row.image_id_a), str(row.image_id_b))
+        id_b = max(str(row.image_id_a), str(row.image_id_b))
+        db.execute(
+            text("DELETE FROM suppression_pairs WHERE id_a = :a AND id_b = :b"),
+            {"a": id_a, "b": id_b},
+        )
+
+    # Reset reviewed_at
+    db.execute(
+        text(
+            "UPDATE duplicate_candidates SET reviewed_at = NULL WHERE id = ANY(:ids::uuid[])"
+        ),
+        {"ids": candidate_ids},
+    )
+
+    db.commit()
+    return {"undone": len(candidate_ids)}
+
+
 def _maybe_trigger_reprocess(catalog_id: str, layer: str, db: Session) -> None:
     """Submit a targeted reprocess job if threshold drifted ≥ 1 bit since last run."""
     # Only layers with adaptive thresholds
@@ -370,6 +490,141 @@ def _update_threshold(
     )
 
 
+@router.get("/{catalog_id}/duplicates/groups")
+def list_duplicate_groups(
+    catalog_id: uuid.UUID,
+    layer: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Return pending duplicate candidates collapsed into connected-component groups.
+
+    Uses union-find across all unreviewed pairs to merge A-B, B-C → group {A,B,C}.
+    Pagination is applied after grouping.
+    """
+    get_catalog(catalog_id, db)
+
+    filters = ["dc.catalog_id = CAST(:cid AS uuid)", "dc.reviewed_at IS NULL"]
+    params: Dict[str, Any] = {"cid": str(catalog_id)}
+    if layer:
+        filters.append("dc.layer = :layer")
+        params["layer"] = layer
+
+    where = " AND ".join(filters)
+
+    rows = db.execute(
+        text(
+            f"""
+            SELECT dc.id, dc.image_id_a, dc.image_id_b, dc.layer, dc.confidence,
+                   dc.verify_carefully, dc.verify_reason
+            FROM duplicate_candidates dc
+            WHERE {where}
+            ORDER BY dc.confidence DESC
+        """
+        ),
+        params,
+    ).fetchall()
+
+    if not rows:
+        return {"groups": [], "total_groups": 0, "total_images": 0}
+
+    # Union-Find with path compression
+    parent: Dict[str, str] = {}
+
+    def find(x: str) -> str:
+        if x not in parent:
+            parent[x] = x
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x: str, y: str) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    all_pairs = []
+    image_ids: set = set()
+    for row in rows:
+        id_a = str(row.image_id_a)
+        id_b = str(row.image_id_b)
+        union(id_a, id_b)
+        all_pairs.append(dict(row._mapping))
+        image_ids.add(id_a)
+        image_ids.add(id_b)
+
+    # Group pairs by their component root
+    from collections import defaultdict
+
+    component_pairs: Dict[str, List] = defaultdict(list)
+    for pair in all_pairs:
+        root = find(str(pair["image_id_a"]))
+        component_pairs[root].append(pair)
+
+    # Fetch image metadata for all involved images
+    img_rows = db.execute(
+        text(
+            """
+            SELECT id, source_path, width, height, format, size_bytes
+            FROM images
+            WHERE id = ANY(:ids)
+        """
+        ),
+        {"ids": list(image_ids)},
+    ).fetchall()
+    img_map = {str(r.id): dict(r._mapping) for r in img_rows}
+
+    # Build group objects
+    groups = []
+    for root, pairs in component_pairs.items():
+        group_image_ids: set = set()
+        for p in pairs:
+            group_image_ids.add(str(p["image_id_a"]))
+            group_image_ids.add(str(p["image_id_b"]))
+
+        layers = list({p["layer"] for p in pairs})
+        max_confidence = max(p["confidence"] for p in pairs)
+        has_verify = any(p["verify_carefully"] for p in pairs)
+        images = [img_map[iid] for iid in group_image_ids if iid in img_map]
+
+        groups.append(
+            {
+                "id": root,
+                "image_count": len(group_image_ids),
+                "pair_count": len(pairs),
+                "images": images,
+                "pairs": [
+                    {
+                        "id": str(p["id"]),
+                        "image_id_a": str(p["image_id_a"]),
+                        "image_id_b": str(p["image_id_b"]),
+                        "layer": p["layer"],
+                        "confidence": p["confidence"],
+                        "verify_carefully": p["verify_carefully"],
+                    }
+                    for p in pairs
+                ],
+                "max_confidence": max_confidence,
+                "layers": layers,
+                "has_verify_carefully": has_verify,
+            }
+        )
+
+    # Sort: highest confidence first, then largest group
+    groups.sort(key=lambda g: (-g["max_confidence"], -g["image_count"]))
+
+    total_groups = len(groups)
+    total_images = len(image_ids)
+    paged = groups[offset : offset + limit]
+
+    return {
+        "groups": paged,
+        "total_groups": total_groups,
+        "total_images": total_images,
+    }
+
+
 @router.get("/{catalog_id}/duplicates/stats")
 def get_duplicate_stats(
     catalog_id: uuid.UUID,
@@ -420,10 +675,25 @@ def get_duplicate_stats(
         {"cid": str(catalog_id)},
     ).scalar()
 
+    # Count hamming=0 pairs eligible for auto-resolve (what the job actually processes)
+    auto_resolvable = db.execute(
+        text(
+            """
+            SELECT COUNT(*) FROM duplicate_candidates
+            WHERE catalog_id = CAST(:cid AS uuid)
+              AND reviewed_at IS NULL
+              AND layer IN ('near_duplicate', 'format_variant')
+              AND (detection_meta->>'hamming')::int = 0
+        """
+        ),
+        {"cid": str(catalog_id)},
+    ).scalar()
+
     return {
         "by_layer": [dict(r._mapping) for r in by_layer],
         "thresholds": [dict(r._mapping) for r in thresholds],
         "suppressed_pairs": suppressed,
+        "auto_resolvable": auto_resolvable or 0,
     }
 
 
@@ -493,9 +763,25 @@ def list_archive(
     rows = db.execute(
         text(
             f"""
-            SELECT * FROM archived_images
-            WHERE {where}
-            ORDER BY archived_at DESC
+            SELECT
+                ai.id, ai.source_path, ai.format, ai.width, ai.height,
+                ai.size_bytes, ai.quality_score, ai.thumbnail_path,
+                ai.archive_reason, ai.archived_at, ai.primary_image_id,
+                ai.decision_id,
+                pi.source_path AS primary_path,
+                pi.format AS primary_format,
+                pi.width AS primary_width,
+                pi.height AS primary_height,
+                pi.size_bytes AS primary_size_bytes,
+                pi.thumbnail_path AS primary_thumbnail_path,
+                dd.decision, dd.notes AS decision_notes,
+                dc.layer AS candidate_layer, dc.confidence
+            FROM archived_images ai
+            LEFT JOIN images pi ON pi.id = ai.primary_image_id
+            LEFT JOIN duplicate_decisions dd ON dd.id = ai.decision_id
+            LEFT JOIN duplicate_candidates dc ON dc.id = dd.candidate_id
+            WHERE ai.{where}
+            ORDER BY ai.archived_at DESC
             LIMIT :limit OFFSET :offset
         """
         ),

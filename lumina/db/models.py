@@ -130,6 +130,9 @@ class Image(Base):
         nullable=False,
     )
     source_path = Column(Text, nullable=False)
+    organized_path = Column(
+        Text, nullable=True
+    )  # path after reorganization (None = not yet organized)
     file_type = Column(String, nullable=False)  # 'image' or 'video'
     checksum = Column(Text, nullable=False)
     size_bytes = Column(BigInteger)

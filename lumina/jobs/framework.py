@@ -192,6 +192,9 @@ class JobExecutor(Generic[T]):
         total_items = len(items)
         logger.info(f"Discovered {total_items} items for job {job_id}")
 
+        # Inject job_id into kwargs so process functions can emit progress
+        kwargs["job_id"] = job_id
+
         if not items:
             return self._empty_result()
 
@@ -205,6 +208,8 @@ class JobExecutor(Generic[T]):
         success_count = 0
         error_count = 0
 
+        from .background_jobs import update_job_status
+
         # Process each batch sequentially
         for i, batch in enumerate(batches):
             logger.debug(f"Processing batch {i+1}/{len(batches)} ({len(batch)} items)")
@@ -213,6 +218,20 @@ class JobExecutor(Generic[T]):
             all_errors.extend(batch_result["errors"])
             success_count += batch_result["success_count"]
             error_count += batch_result["error_count"]
+
+            # Report progress after each batch
+            processed = success_count + error_count
+            percent = int(processed / total_items * 100) if total_items > 0 else 0
+            update_job_status(
+                job_id,
+                "PROGRESS",
+                progress={
+                    "current": processed,
+                    "total": total_items,
+                    "percent": percent,
+                    "message": f"Processed {processed:,} / {total_items:,}",
+                },
+            )
 
         # Phase 4: Finalize
         result = {

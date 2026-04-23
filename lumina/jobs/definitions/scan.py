@@ -71,13 +71,37 @@ def discover_files(
             catalog = session.query(Catalog).filter(Catalog.id == catalog_id).first()
             source_dirs = catalog.source_directories if catalog else []
 
+    # Also load the catalog's organized_directory so we can exclude it during scan
+    organized_dir: Optional[Path] = None
+    try:
+        from lumina.db.models import Catalog as _Catalog
+        from lumina.db.session import get_db_session as _get_db_session
+
+        with _get_db_session() as session:
+            cat = session.query(_Catalog).filter(_Catalog.id == catalog_id).first()
+            if cat and cat.organized_directory:
+                organized_dir = Path(cat.organized_directory).resolve()
+    except Exception:
+        pass  # non-fatal; worst case we scan the output dir too
+
     files = []
     for dir_path in source_dirs:
         path = Path(dir_path)
-        if path.exists() and path.is_dir():
-            for file in path.rglob("*"):
-                if file.is_file() and file.suffix.lower() in MEDIA_EXTENSIONS:
-                    files.append(str(file))
+        if not (path.exists() and path.is_dir()):
+            continue
+        for file in path.rglob("*"):
+            if not file.is_file():
+                continue
+            if file.suffix.lower() not in MEDIA_EXTENSIONS:
+                continue
+            # Skip anything inside the organized output directory
+            if organized_dir is not None:
+                try:
+                    file.resolve().relative_to(organized_dir)
+                    continue  # file is inside the output dir — skip it
+                except ValueError:
+                    pass  # not under organized_dir — include it
+            files.append(str(file))
 
     return files
 

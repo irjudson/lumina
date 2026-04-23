@@ -60,7 +60,7 @@ def upsert_candidate(candidate: CandidatePair, session: Session) -> None:
                 gen_random_uuid(),
                 i.catalog_id,
                 :a, :b, :layer, :confidence,
-                :verify_carefully, :verify_reason, :meta::jsonb, NOW()
+                :verify_carefully, :verify_reason, CAST(:meta AS jsonb), NOW()
             FROM images i WHERE i.id = :a
             ON CONFLICT (image_id_a, image_id_b, layer)
             DO UPDATE SET

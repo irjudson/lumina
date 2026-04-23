@@ -44,7 +44,7 @@ def _load_images(catalog_id: str, session, mode: str = "full") -> List[Dict]:
     base_query = """
         SELECT id, source_path, checksum, format, dhash, ahash, whash,
                dhash_16, dhash_32, width, height, capture_time,
-               camera_make, camera_model, created_at, metadata
+               camera_make, camera_model, created_at, metadata, burst_id
         FROM images
         WHERE catalog_id = CAST(:cid AS uuid) AND status_id = 'active'
     """
@@ -167,6 +167,22 @@ def run_all_layers(
     Since discover returns [catalog_id], item_catalog_id == catalog_id.
     """
     from lumina.db.connection import get_db_context
+    from lumina.jobs.background_jobs import update_job_status
+
+    job_id = kwargs.get("job_id")
+
+    def _progress(step: int, total_steps: int, message: str) -> None:
+        if job_id:
+            update_job_status(
+                job_id,
+                "PROGRESS",
+                progress={
+                    "current": step,
+                    "total": total_steps,
+                    "percent": int(step / total_steps * 100) if total_steps else 0,
+                    "message": message,
+                },
+            )
 
     with get_db_context() as session:
         # Clear stale candidates based on mode
@@ -176,6 +192,7 @@ def run_all_layers(
             _clear_unreviewed(catalog_id, layer, session)
         session.commit()
 
+        _progress(0, 6, "Loading images...")
         _ensure_hashes(catalog_id, session)
         images = _load_images(catalog_id, session, mode)
         thresholds = _load_thresholds(catalog_id, session)
@@ -205,7 +222,13 @@ def run_all_layers(
         if mode == "layer" and layer:
             layer_fns = [(name, fn) for name, fn in layer_fns if name == layer]
 
-        for layer_name, layer_fn in layer_fns:
+        total_steps = len(layer_fns) + 1  # +1 for loading
+        for step, (layer_name, layer_fn) in enumerate(layer_fns, start=1):
+            _progress(
+                step,
+                total_steps,
+                f"Running {layer_name} detection ({len(images):,} images)...",
+            )
             n = 0
             for candidate in filter_suppressed(
                 layer_fn(images, thresholds), suppressed
