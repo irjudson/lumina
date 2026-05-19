@@ -113,7 +113,6 @@ tagging-all = [
 
 [project.scripts]
 lumina-analyze = "lumina.cli.analyze:analyze"
-lumina-organize = "lumina.cli.organize:organize"
 lumina-web = "lumina.cli.web:web"
 lumina-server = "lumina.cli.server:server"
 lumina-generate-thumbnails = "lumina.cli.generate_thumbnails:generate"

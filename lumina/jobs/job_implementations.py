@@ -1285,13 +1285,17 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
     Returns:
         summary: count breakdown
         exceptions: list of items needing attention (iffy, unresolved, collision, error)
+        transaction_id: UUID of the transaction log (written to <organized_dir>/.transactions/)
         dry_run: whether this was a preview-only run
     """
+    import shutil
+    import uuid
     from pathlib import Path
 
     from ..db import get_db_context
     from ..db.models import Catalog, Image
     from ..jobs.definitions.organize import _plan_organization
+    from ..organization import TransactionLog, TransactionStatus
     from ..shared.media_utils import compute_checksum
 
     operation = ctx.get("operation", "copy")
@@ -1327,6 +1331,9 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
         query = db.query(Image).filter(Image.catalog_id == ctx.catalog_id)
         images = query.all()
 
+    # Build checksum lookup for transaction logging
+    checksum_map: Dict[str, str] = {str(img.id): (img.checksum or "") for img in images}
+
     # Build organization plan
     update_job_status(
         ctx.job_id,
@@ -1343,13 +1350,17 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
             "exceptions": plan["exceptions"],
         }
 
+    # Create transaction log — written to <output_dir>/.transactions/<id>.json
+    transaction_id = str(uuid.uuid4())
+    txlog = TransactionLog(transaction_id=transaction_id, dry_run=False)
+    log_path = output_dir / ".transactions" / f"{transaction_id}.json"
+
     # Execute file operations
     operations = plan["operations"]
     total_ops = len(operations)
     organized = 0
     errors = []
-
-    import shutil
+    LOG_SAVE_INTERVAL = 50  # flush transaction log every N operations
 
     for i, op in enumerate(operations):
         if should_stop_job(ctx.job_id):
@@ -1370,12 +1381,22 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
 
         source = Path(op["source_path"])
         dest = Path(op["dest_path"])
+        op_id = str(i)
 
         if not source.exists():
             errors.append(
                 {"image_id": op["image_id"], "error": f"Source not found: {source}"}
             )
             continue
+
+        # Record this operation before touching the filesystem
+        txlog.add_operation(
+            operation_id=op_id,
+            source_path=source,
+            target_path=dest,
+            operation_type=operation,
+            checksum=checksum_map.get(op["image_id"], ""),
+        )
 
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1392,19 +1413,34 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
                 if image:
                     if image.checksum != dest_checksum:
                         dest.unlink(missing_ok=True)
+                        txlog.update_operation_status(
+                            op_id,
+                            TransactionStatus.FAILED,
+                            f"Checksum mismatch after {operation}",
+                        )
                         raise ValueError(f"Checksum mismatch after {operation}")
                     image.organized_path = str(dest)
                     flags = dict(image.processing_flags or {})
                     flags["organized"] = True
                     flags["organization_confidence"] = op["tier"]
+                    flags["transaction_id"] = transaction_id
                     image.processing_flags = flags
                     db.commit()
 
+            txlog.update_operation_status(op_id, TransactionStatus.COMPLETED)
             organized += 1
 
         except Exception as e:
             logger.error(f"Error organizing {source}: {e}")
+            txlog.update_operation_status(op_id, TransactionStatus.FAILED, str(e))
             errors.append({"image_id": op["image_id"], "error": str(e)})
+
+        # Flush log periodically so a crash leaves a usable audit trail
+        if (i + 1) % LOG_SAVE_INTERVAL == 0:
+            txlog.save(log_path)
+
+    # Final save of the complete transaction log
+    txlog.save(log_path)
 
     update_job_status(
         ctx.job_id,
@@ -1414,6 +1450,7 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
 
     return {
         "dry_run": False,
+        "transaction_id": transaction_id,
         "summary": {
             **plan["summary"],
             "organized": organized,
