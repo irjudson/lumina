@@ -495,7 +495,7 @@ def auto_tag_job(ctx: JobContext) -> Dict[str, Any]:
 
     try:
         # Parameters
-        backend = ctx.get("backend", "openclip")
+        backend = ctx.get("backend", "auto")
         model = ctx.get("model", None)
         threshold = ctx.get("threshold", 0.25)
         max_tags = ctx.get("max_tags", 10)
@@ -504,6 +504,19 @@ def auto_tag_job(ctx: JobContext) -> Dict[str, Any]:
 
         # Backend availability check
         backends_status = check_backends_available()
+
+        # "auto": use ollama if available, fall back to openclip
+        if backend == "auto":
+            if backends_status.get("ollama"):
+                backend = "ollama"
+                logger.info("auto backend: selected ollama")
+            elif backends_status.get("openclip"):
+                backend = "openclip"
+                logger.info("auto backend: ollama unavailable, fell back to openclip")
+            else:
+                raise RuntimeError(
+                    "No tagging backend available. Install open-clip-torch or start Ollama."
+                )
 
         if backend == "openclip" and not backends_status.get("openclip"):
             raise RuntimeError(
