@@ -3,7 +3,7 @@
 
 import re
 from datetime import timedelta
-from math import sqrt
+from math import floor, log2, sqrt
 from typing import Any, Dict, Iterator, List
 
 from lumina.analysis.hashing import hamming_distance
@@ -63,25 +63,46 @@ def _count_corroborating_signals(small: Dict, large: Dict) -> int:
     return signals
 
 
+def _build_pixel_buckets(images: List[Dict]) -> Dict[int, List[Dict]]:
+    """Group images into log2(pixel_count) buckets for fast range lookup."""
+    buckets: Dict[int, List[Dict]] = {}
+    for img in images:
+        px = (img.get("width") or 0) * (img.get("height") or 0)
+        if px > 0:
+            buckets.setdefault(floor(log2(px)), []).append(img)
+    return buckets
+
+
 def _size_band_candidates(
     large: Dict,
-    all_images: List[Dict],
+    buckets: Dict[int, List[Dict]],
     min_ratio: float = 0.05,
     max_ratio: float = 0.95,
 ) -> Iterator[Dict]:
-    """Yield images smaller than large within the size ratio band."""
+    """Yield images smaller than large within the size ratio band.
+
+    Uses pre-built log2 pixel buckets so each call checks O(N/B) images
+    instead of all N, where B is the number of buckets in the ratio range
+    (typically 5-6 buckets vs. the full list).
+    """
     large_pixels = (large.get("width") or 0) * (large.get("height") or 0)
     if large_pixels == 0:
         return
-    for img in all_images:
-        if img["id"] == large["id"]:
-            continue
-        small_pixels = (img.get("width") or 0) * (img.get("height") or 0)
-        if small_pixels == 0:
-            continue
-        ratio = small_pixels / large_pixels
-        if min_ratio <= ratio <= max_ratio:
-            yield img
+    min_px = large_pixels * min_ratio
+    max_px = large_pixels * max_ratio
+    min_bucket = floor(log2(min_px)) if min_px >= 1 else 0
+    max_bucket = floor(log2(max_px)) if max_px >= 1 else 0
+    large_id = large["id"]
+    for b in range(min_bucket, max_bucket + 1):
+        for img in buckets.get(b, []):
+            if img["id"] == large_id:
+                continue
+            small_pixels = (img.get("width") or 0) * (img.get("height") or 0)
+            if small_pixels == 0:
+                continue
+            ratio = small_pixels / large_pixels
+            if min_ratio <= ratio <= max_ratio:
+                yield img
 
 
 def detect_previews(
@@ -104,13 +125,14 @@ def detect_previews(
         key=lambda i: (i.get("width") or 0) * (i.get("height") or 0),
         reverse=True,
     )
+    buckets = _build_pixel_buckets(images)
 
     for large in by_size:
         large_pixels = (large.get("width") or 0) * (large.get("height") or 0)
         if large_pixels < SMALL_IMAGE_PIXELS:
             break  # remaining images are all small — no more large originals
 
-        for small in _size_band_candidates(large, images):
+        for small in _size_band_candidates(large, buckets):
             small_pixels = (small.get("width") or 0) * (small.get("height") or 0)
             scale = sqrt(small_pixels / large_pixels)
 
