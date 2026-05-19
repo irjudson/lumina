@@ -85,6 +85,31 @@ def _get_subdirectory(status_id: str, tier: str) -> str:
     return ""  # primary tree (resolved + iffy)
 
 
+def _find_xmp_sidecar(source: Path) -> Optional[Path]:
+    """Return the XMP sidecar for source if one exists, else None.
+
+    Checks both conventions used by Lightroom and Darktable:
+      stem.xmp          — extension-replaced  (Lightroom default, also Darktable option)
+      stem.ext.xmp      — appended            (Darktable default)
+
+    Appended takes precedence if both exist (more specific to the file format).
+    """
+    appended = source.parent / (source.name + ".xmp")
+    if appended.exists():
+        return appended
+    replaced = source.parent / (source.stem + ".xmp")
+    if replaced.exists():
+        return replaced
+    return None
+
+
+def _xmp_dest_path(dest: Path, sidecar_src: Path, image_src: Path) -> Path:
+    """Return the destination XMP path, preserving the source naming convention."""
+    if sidecar_src.name == image_src.name + ".xmp":
+        return dest.parent / (dest.name + ".xmp")
+    return dest.parent / (dest.stem + ".xmp")
+
+
 def _make_date_dir(capture_time) -> str:
     """Format capture_time into YYYY/MM-DD directory path."""
     if capture_time is None:

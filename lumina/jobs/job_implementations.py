@@ -1294,7 +1294,11 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
 
     from ..db import get_db_context
     from ..db.models import Catalog, Image
-    from ..jobs.definitions.organize import _plan_organization
+    from ..jobs.definitions.organize import (
+        _find_xmp_sidecar,
+        _plan_organization,
+        _xmp_dest_path,
+    )
     from ..organization import TransactionLog, TransactionStatus
     from ..shared.media_utils import compute_checksum
 
@@ -1359,6 +1363,7 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
     operations = plan["operations"]
     total_ops = len(operations)
     organized = 0
+    sidecars_copied = 0
     errors = []
     LOG_SAVE_INTERVAL = 50  # flush transaction log every N operations
 
@@ -1405,6 +1410,21 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
                 shutil.copy2(str(source), str(dest))
             else:
                 shutil.move(str(source), str(dest))
+
+            # Copy/move XMP sidecar if present
+            sidecar_src = _find_xmp_sidecar(source)
+            if sidecar_src:
+                sidecar_dst = _xmp_dest_path(dest, sidecar_src, source)
+                try:
+                    if operation == "copy":
+                        shutil.copy2(str(sidecar_src), str(sidecar_dst))
+                    else:
+                        shutil.move(str(sidecar_src), str(sidecar_dst))
+                    sidecars_copied += 1
+                except Exception as xmp_err:
+                    logger.warning(
+                        f"XMP sidecar copy failed for {sidecar_src}: {xmp_err}"
+                    )
 
             # Checksum verification
             dest_checksum = compute_checksum(dest)
@@ -1454,6 +1474,7 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
         "summary": {
             **plan["summary"],
             "organized": organized,
+            "sidecars_copied": sidecars_copied,
             "errors": len(errors),
         },
         "exceptions": plan["exceptions"],
