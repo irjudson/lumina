@@ -1424,6 +1424,145 @@ def organize_job(ctx: JobContext) -> Dict[str, Any]:
     }
 
 
+def undo_organize_job(ctx: JobContext) -> Dict[str, Any]:
+    """Undo a previous organize run.
+
+    For each image with organized_path set:
+      - If source path still exists (copy was done): deletes the organized copy.
+      - If source path is missing (move was done): moves file back to source path.
+
+    Clears organized_path and processing_flags['organized'] for each reversed image.
+
+    Parameters (via ctx.parameters):
+        dry_run: bool — if True, report what would happen without changes (default False)
+    """
+    from pathlib import Path
+
+    from ..db import get_db_context
+    from ..db.models import Image
+
+    dry_run = ctx.get("dry_run", False)
+
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 0, "total": 100, "percent": 0, "phase": "loading"},
+    )
+
+    with get_db_context() as db:
+        images = (
+            db.query(Image)
+            .filter(
+                Image.catalog_id == ctx.catalog_id,
+                Image.organized_path.isnot(None),
+            )
+            .all()
+        )
+
+    total = len(images)
+    if total == 0:
+        return {
+            "dry_run": dry_run,
+            "summary": {
+                "total_organized": 0,
+                "copies_deleted": 0,
+                "moves_reversed": 0,
+                "errors": 0,
+                "skipped": 0,
+            },
+            "message": "No organized images found — nothing to undo.",
+        }
+
+    copies_deleted = 0
+    moves_reversed = 0
+    errors = []
+    skipped = 0
+
+    import shutil
+
+    for i, image in enumerate(images):
+        if should_stop_job(ctx.job_id):
+            break
+
+        percent = int((i / max(total, 1)) * 90)
+        update_job_status(
+            ctx.job_id,
+            "PROGRESS",
+            progress={
+                "current": i,
+                "total": total,
+                "percent": percent,
+                "phase": "undoing",
+                "message": f"Undoing {i + 1}/{total}",
+            },
+        )
+
+        organized = Path(image.organized_path)
+        source = Path(image.path)
+
+        if not organized.exists():
+            skipped += 1
+            if not dry_run:
+                with get_db_context() as db:
+                    img = db.query(Image).filter(Image.id == image.id).first()
+                    if img:
+                        img.organized_path = None
+                        flags = dict(img.processing_flags or {})
+                        flags.pop("organized", None)
+                        flags.pop("organization_confidence", None)
+                        img.processing_flags = flags
+                        db.commit()
+            continue
+
+        try:
+            if source.exists():
+                # Copy was done — delete the organized copy
+                if not dry_run:
+                    organized.unlink()
+                copies_deleted += 1
+            else:
+                # Move was done — move file back to source path
+                if not dry_run:
+                    source.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(organized), str(source))
+                moves_reversed += 1
+
+            if not dry_run:
+                with get_db_context() as db:
+                    img = db.query(Image).filter(Image.id == image.id).first()
+                    if img:
+                        img.organized_path = None
+                        flags = dict(img.processing_flags or {})
+                        flags.pop("organized", None)
+                        flags.pop("organization_confidence", None)
+                        img.processing_flags = flags
+                        db.commit()
+
+        except Exception as e:
+            logger.error(f"Error undoing organization for {image.path}: {e}")
+            errors.append(
+                {"image_id": str(image.id), "path": image.path, "error": str(e)}
+            )
+
+    update_job_status(
+        ctx.job_id,
+        "PROGRESS",
+        progress={"current": 100, "total": 100, "percent": 100, "phase": "finalizing"},
+    )
+
+    return {
+        "dry_run": dry_run,
+        "summary": {
+            "total_organized": total,
+            "copies_deleted": copies_deleted,
+            "moves_reversed": moves_reversed,
+            "errors": len(errors),
+            "skipped": skipped,
+        },
+        "error_details": errors,
+    }
+
+
 def auto_resolve_duplicates_job(ctx: Any) -> Dict[str, Any]:
     """Auto-resolve duplicate candidates using deterministic quality rules.
 
@@ -2019,6 +2158,7 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "hash_images_v2": lambda ctx: _run_framework_job(ctx, "hash_images_v2"),
     "detect_duplicates_v2": lambda ctx: _run_framework_job(ctx, "detect_duplicates_v2"),
     "organize": organize_job,
+    "undo_organize": undo_organize_job,
     "classify_images": classify_images_job,
     "auto_resolve_duplicates": auto_resolve_duplicates_job,
     "detect_events": detect_events_job,

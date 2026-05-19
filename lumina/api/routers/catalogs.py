@@ -3907,6 +3907,69 @@ def preview_organize(
     )
 
 
+class UndoOrganizePreviewResponse(BaseModel):
+    """Response from the undo-organize preview endpoint."""
+
+    total_organized: int
+    copies_to_delete: int
+    moves_to_reverse: int
+    missing_organized_files: int
+    dry_run: bool = True
+
+
+@router.post(
+    "/{catalog_id}/organize/undo/preview", response_model=UndoOrganizePreviewResponse
+)
+def preview_undo_organize(
+    catalog_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Preview what undo-organize would do — no filesystem changes.
+
+    Returns counts of:
+      - copies_to_delete: organized copies that can be deleted (source still exists)
+      - moves_to_reverse: organized files that need moving back (source is gone)
+      - missing_organized_files: organized_path records whose file no longer exists
+    """
+    from pathlib import Path
+
+    from ...db.models import Catalog, Image
+
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    images = (
+        db.query(Image)
+        .filter(Image.catalog_id == catalog_id, Image.organized_path.isnot(None))
+        .all()
+    )
+
+    copies_to_delete = 0
+    moves_to_reverse = 0
+    missing_organized_files = 0
+
+    for image in images:
+        organized = Path(image.organized_path)
+        if not organized.exists():
+            missing_organized_files += 1
+            continue
+        source = Path(image.path)
+        if source.exists():
+            copies_to_delete += 1
+        else:
+            moves_to_reverse += 1
+
+    return UndoOrganizePreviewResponse(
+        total_organized=len(images),
+        copies_to_delete=copies_to_delete,
+        moves_to_reverse=moves_to_reverse,
+        missing_organized_files=missing_organized_files,
+        dry_run=True,
+    )
+
+
 # --- Events ---
 
 
