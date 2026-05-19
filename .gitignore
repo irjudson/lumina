@@ -91,6 +91,7 @@ compute_*.py
 manual_*.py
 monitor_*.sh
 *.sql
+!migrations/*.sql
 
 # Session/warp files
 WARP.md

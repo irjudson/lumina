@@ -223,6 +223,10 @@ class Image(Base):
     # }
     edit_data = Column(JSONB, nullable=True, default=None)
 
+    # Hand-verification columns (set by humans reviewing quality scores)
+    quality_verified_score = Column(Integer, nullable=True)
+    quality_verified_at = Column(DateTime, nullable=True)
+
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

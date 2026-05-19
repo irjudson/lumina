@@ -1992,6 +1992,8 @@ def detect_events_job(ctx: Any) -> Dict[str, Any]:
     }
 
 
+from .definitions.score_quality import score_quality_job  # noqa: E402
+
 JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "scan": scan_analyze_job,
     "analyze": scan_analyze_job,
@@ -2007,4 +2009,5 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "classify_images": classify_images_job,
     "auto_resolve_duplicates": auto_resolve_duplicates_job,
     "detect_events": detect_events_job,
+    "score_quality": score_quality_job,
 }
