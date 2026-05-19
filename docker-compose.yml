@@ -14,7 +14,7 @@ services:
       - lumina-pgdata:/var/lib/postgresql/14/main
       # Mount host directories to access user files
       - /home:/host/home:ro
-      - /mnt/synology:/host/synology:ro
+      - /mnt/synology:/host/synology
       # Development: mount source code for live reload
       - ./lumina:/app/lumina
       # Mount MPS directories for GPU sharing
