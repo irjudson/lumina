@@ -6,8 +6,13 @@ Reorganizes catalog files into a standard output directory structure:
     YYYY/MM-DD/YYYYMMDD_HHMMSS[_NN].ext   ← resolved + iffy images
     _date_only/YYYY/MM-DD/                 ← midnight timestamps (date known, time synthetic)
     _rejected/YYYY/MM-DD/                  ← rejected images
-    _archived/YYYY/MM-DD/                  ← archived images
+    _archived/YYYY/MM-DD/                  ← archived images (confirmed duplicates)
     _unresolved/unknown/                   ← no usable date
+
+Status drives organization — source directory path is irrelevant:
+  active   → primary tree, _date_only, or _unresolved depending on date confidence
+  archived → _archived/ (confirmed duplicate; keeper is elsewhere)
+  rejected → _rejected/
 
 Date confidence tiers (stored in processing_flags after organization):
   resolved  - EXIF DateTimeOriginal/CreateDate with real time component
@@ -15,7 +20,8 @@ Date confidence tiers (stored in processing_flags after organization):
   date_only - any source where time is synthetic midnight 00:00:00
   unresolved - no usable date at all
 
-Excluded from organization entirely: paths containing '#recycle' or 'Possible Duplicate'.
+The only path-based exclusion is images already inside organized_directory
+itself (avoids re-copying already-organized output on re-runs).
 
 Collision resolution: auto-sequence suffix _01, _02, ...
 Operation modes: copy (default, safe) or move.
@@ -40,9 +46,6 @@ RESOLVED_SOURCE_PREFIX = "exif:"
 # ModifyDate is not a reliable capture time — demote to iffy
 IFFY_EXIF_SOURCES = {"exif:ModifyDate"}
 IFFY_SOURCES = {"filename", "directory", "filesystem"}
-
-# Paths containing these substrings are excluded from organization
-EXCLUDED_PATH_SUBSTRINGS = {"#recycle", "Possible Duplicate"}
 
 
 def _is_midnight(capture_time) -> bool:
@@ -160,7 +163,7 @@ def _plan_organization(
 
     summary = {
         "total": 0,
-        "excluded_paths": 0,  # files excluded due to path filters (#recycle, Possible Duplicate, etc.)
+        "skipped_already_in_output": 0,  # source is inside organized_directory (already organized output)
         "skipped_already_organized": 0,
         "skipped_out_of_scope": 0,  # in library but excluded by scope filter (e.g. non-resolved in resolved_only)
         "skipped_pending_duplicates": 0,  # excluded because they have unreviewed duplicate candidates
@@ -207,10 +210,10 @@ def _plan_organization(
         output_dev = None
 
     for image in images:
-        # Exclude recycle bins and duplicate staging directories entirely
-        source_str = str(image.source_path)
-        if any(excl in source_str for excl in EXCLUDED_PATH_SUBSTRINGS):
-            summary["excluded_paths"] += 1
+        # Skip images whose source is already inside organized_directory —
+        # they are previously organized output and should not be re-copied.
+        if str(image.source_path).startswith(str(output_dir) + "/"):
+            summary["skipped_already_in_output"] += 1
             continue
 
         summary["total"] += 1
