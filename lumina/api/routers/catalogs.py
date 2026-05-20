@@ -1676,12 +1676,26 @@ def get_smart_counts(
             WHERE catalog_id = CAST(:catalog_id AS uuid)
               AND reviewed_at IS NULL
         ),
-        non_photo_count AS (
+        screenshot_count AS (
             SELECT COUNT(*) AS cnt
             FROM images
             WHERE catalog_id = :catalog_id
               AND status_id NOT IN ('rejected', 'archived')
-              AND content_class = ANY(ARRAY['invalid','screenshot','document','social_media','artwork'])
+              AND content_class = 'screenshot'
+        ),
+        document_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM images
+            WHERE catalog_id = :catalog_id
+              AND status_id NOT IN ('rejected', 'archived')
+              AND content_class = 'document'
+        ),
+        noise_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM images
+            WHERE catalog_id = :catalog_id
+              AND status_id NOT IN ('rejected', 'archived')
+              AND content_class = ANY(ARRAY['invalid','social_media','artwork','meme','received','other'])
         ),
         rejected_count AS (
             SELECT COUNT(*) AS cnt
@@ -1707,11 +1721,14 @@ def get_smart_counts(
             ic.untagged,
             bc.cnt   AS bursts,
             dc.cnt   AS duplicates,
-            npc.cnt  AS non_photo,
+            sc.cnt   AS screenshots,
+            docc.cnt AS documents,
+            nc.cnt   AS noise,
             rc.cnt   AS rejected,
             nrc.cnt  AS needs_review,
             ec.cnt   AS events
-        FROM image_counts ic, burst_count bc, duplicate_count dc, non_photo_count npc,
+        FROM image_counts ic, burst_count bc, duplicate_count dc,
+             screenshot_count sc, document_count docc, noise_count nc,
              rejected_count rc, needs_review_count nrc, event_count ec
         """
     )
@@ -1725,7 +1742,11 @@ def get_smart_counts(
         "geotagged": int(row.geotagged) if row and row.geotagged is not None else 0,
         "bursts": int(row.bursts) if row and row.bursts is not None else 0,
         "duplicates": int(row.duplicates) if row and row.duplicates is not None else 0,
-        "non_photo": int(row.non_photo) if row and row.non_photo is not None else 0,
+        "screenshots": (
+            int(row.screenshots) if row and row.screenshots is not None else 0
+        ),
+        "documents": int(row.documents) if row and row.documents is not None else 0,
+        "noise": int(row.noise) if row and row.noise is not None else 0,
         "rejected": int(row.rejected) if row and row.rejected is not None else 0,
         "needs_review": (
             int(row.needs_review) if row and row.needs_review is not None else 0

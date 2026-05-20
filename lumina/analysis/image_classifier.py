@@ -8,6 +8,7 @@ Two-tier approach:
     - Exact device-screen dimensions → 'screenshot'
     - Very high aspect ratio (>3:1 or <1:3) → 'screenshot'
     - Animated GIF → 'other'
+    - No camera EXIF + standard social dimensions → 'received'
 
   Tier 2 (optional, Ollama VLM):
     - Runs only on images that tier 1 labelled 'unknown'
@@ -18,8 +19,10 @@ Categories:
     screenshot  — device screen capture (detected by dimensions/aspect)
     photo       — real-world photograph
     document    — scanned/photographed document, receipt, form
-    social_media — social media image with overlaid UI/text
-    artwork     — digital art, illustration, graphic design
+    social_media — image with overlaid UI chrome, watermarks, or platform branding
+    meme        — image macro / meme (photo or graphic with overlaid text)
+    received    — image received via messaging with no camera EXIF (not taken by user)
+    artwork     — digital art, illustration, drawing, painting, graphic design
     other       — animated GIF, icon, or anything unclassifiable
     unknown     — not yet classified by heuristics (needs VLM or stays unknown)
 """
@@ -37,10 +40,39 @@ CONTENT_CLASSES = [
     "screenshot",
     "document",
     "social_media",
+    "meme",
+    "received",
     "artwork",
     "invalid",
     "other",
 ]
+
+# Noise classes — images that are clutter rather than user photos.
+# Used by smart-counts and UI filtering.
+NOISE_CLASSES = {"invalid", "social_media", "meme", "received", "artwork", "other"}
+
+# Standard social/messaging image dimensions (width, height).
+# Images at these exact sizes with no camera EXIF are almost certainly received content.
+SOCIAL_DIMENSIONS = {
+    (1080, 1080),  # Instagram square
+    (640, 640),
+    (800, 800),
+    (720, 720),
+    (1080, 1350),  # Instagram portrait
+    (1350, 1080),
+    (1080, 608),  # Instagram landscape
+    (608, 1080),
+    (1200, 630),  # Facebook/OG share
+    (630, 1200),
+    (1200, 628),
+    (628, 1200),
+    (1024, 512),  # Twitter/X card
+    (512, 1024),
+    (900, 900),
+    (960, 960),
+    (480, 480),
+    (320, 320),
+}
 
 # Common exact device screen resolutions (w, h) — portrait and landscape
 SCREEN_RESOLUTIONS = {
@@ -105,6 +137,12 @@ def heuristic_classify(image_path: Path) -> Tuple[str, str]:
             width, height = img.size
             fmt = img.format or ""
             n_frames = getattr(img, "n_frames", 1)
+            # Tag 271 = Make, Tag 272 = Model
+            try:
+                exif = img.getexif()
+                has_camera_exif = bool(exif.get(271) or exif.get(272))
+            except Exception:
+                has_camera_exif = False
     except (UnidentifiedImageError, Exception) as e:
         return ("invalid", f"PIL cannot open: {e}")
 
@@ -124,6 +162,10 @@ def heuristic_classify(image_path: Path) -> Tuple[str, str]:
     ratio = max(width, height) / max(min(width, height), 1)
     if ratio > 3.5:
         return ("screenshot", f"extreme aspect ratio {ratio:.1f}:1")
+
+    # --- Tier 1f: no camera EXIF + standard social dimensions → received ---
+    if not has_camera_exif and (width, height) in SOCIAL_DIMENSIONS:
+        return ("received", f"no camera EXIF, social dimensions {width}x{height}")
 
     return ("unknown", "no heuristic matched")
 
@@ -172,7 +214,9 @@ class ImageClassifier:
             "- photo: real-world photograph of people, places, nature, events, objects\n"
             "- screenshot: screen capture from a phone, computer, app, or website\n"
             "- document: scanned/photographed document, receipt, form, page of text\n"
-            "- social_media: image designed for social media with overlaid UI/text/watermarks\n"
+            "- social_media: image with overlaid platform UI chrome, watermarks, or branding\n"
+            "- meme: image macro or meme (photo or graphic with large overlaid text)\n"
+            "- received: forwarded or downloaded image (clip art, stock photo, decorative graphic sent via messaging)\n"
             "- artwork: digital art, illustration, drawing, painting, graphic design\n"
             "- other: anything else\n\n"
             "Reply with ONLY the single category word."
