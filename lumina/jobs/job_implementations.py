@@ -1932,7 +1932,12 @@ def classify_images_job(ctx: Any) -> Dict[str, Any]:
                 if label == "unknown" and use_vlm and classifier:
                     label = classifier.classify_with_vlm(path_to_use)
                 elif label == "unknown":
-                    label = "other"  # heuristics undecided, no VLM → leave as other
+                    # Heuristics undecided and no VLM — skip rather than write a
+                    # misleading 'other' label; image stays NULL for a future VLM pass
+                    by_class["_skipped_unknown"] = (
+                        by_class.get("_skipped_unknown", 0) + 1
+                    )
+                    continue
                 by_class[label] = by_class.get(label, 0) + 1
                 pending_updates.append((img_id, label))
                 flush()

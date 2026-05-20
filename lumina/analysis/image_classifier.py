@@ -47,9 +47,10 @@ CONTENT_CLASSES = [
     "other",
 ]
 
-# Noise classes — images that are clutter rather than user photos.
+# Noise classes — high-confidence non-photo content (clutter, junk, broken files).
+# Excludes 'other' and 'artwork' which have too many false positives without VLM.
 # Used by smart-counts and UI filtering.
-NOISE_CLASSES = {"invalid", "social_media", "meme", "received", "artwork", "other"}
+NOISE_CLASSES = {"invalid", "meme", "received", "social_media"}
 
 # Standard social/messaging image dimensions (width, height).
 # Images at these exact sizes with no camera EXIF are almost certainly received content.

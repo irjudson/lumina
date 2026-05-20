@@ -1695,7 +1695,7 @@ def get_smart_counts(
             FROM images
             WHERE catalog_id = :catalog_id
               AND status_id NOT IN ('rejected', 'archived')
-              AND content_class = ANY(ARRAY['invalid','social_media','artwork','meme','received','other'])
+              AND content_class = ANY(ARRAY['invalid','social_media','meme','received'])
         ),
         rejected_count AS (
             SELECT COUNT(*) AS cnt
