@@ -390,12 +390,14 @@ def list_catalog_images(
     # Date range filters
     if date_from:
         conditions.append(
-            "(dates->>'selected_date')::timestamp >= :date_from::timestamp"
+            "(dates->>'selected_date')::timestamp >= CAST(:date_from AS timestamp)"
         )
         params["date_from"] = date_from
 
     if date_to:
-        conditions.append("(dates->>'selected_date')::timestamp <= :date_to::timestamp")
+        conditions.append(
+            "(dates->>'selected_date')::timestamp <= CAST(:date_to AS timestamp)"
+        )
         params["date_to"] = date_to
 
     # Resolution filters
@@ -409,11 +411,11 @@ def list_catalog_images(
 
     # Import-date (created_at) filters
     if created_at_from:
-        conditions.append("created_at >= :created_at_from::timestamp")
+        conditions.append("created_at >= CAST(:created_at_from AS timestamp)")
         params["created_at_from"] = created_at_from
 
     if created_at_to:
-        conditions.append("created_at <= :created_at_to::timestamp")
+        conditions.append("created_at <= CAST(:created_at_to AS timestamp)")
         params["created_at_to"] = created_at_to
 
     # Tag filters
@@ -1266,13 +1268,13 @@ def get_map_clusters(
 
     if date_from:
         date_conditions.append(
-            "(dates->>'selected_date')::timestamp >= (:date_from)::timestamp"
+            "(dates->>'selected_date')::timestamp >= CAST(:date_from AS timestamp)"
         )
         params["date_from"] = date_from
 
     if date_to:
         date_conditions.append(
-            "(dates->>'selected_date')::timestamp <= (:date_to)::timestamp"
+            "(dates->>'selected_date')::timestamp <= CAST(:date_to AS timestamp)"
         )
         params["date_to"] = date_to
 
@@ -1554,13 +1556,13 @@ def get_images_in_cluster(
     # Date filters
     if date_from:
         conditions.append(
-            "(dates->>'selected_date')::timestamp >= (:date_from)::timestamp"
+            "(dates->>'selected_date')::timestamp >= CAST(:date_from AS timestamp)"
         )
         params["date_from"] = date_from
 
     if date_to:
         conditions.append(
-            "(dates->>'selected_date')::timestamp <= (:date_to)::timestamp"
+            "(dates->>'selected_date')::timestamp <= CAST(:date_to AS timestamp)"
         )
         params["date_to"] = date_to
 
