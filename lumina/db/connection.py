@@ -31,27 +31,34 @@ def _populate_reference_tables(db: Session) -> None:
     from .models import ImageStatus
 
     # Check if ImageStatus table needs population
-    if db.query(ImageStatus).count() == 0:
-        logger.info("Populating image_statuses reference table...")
-        statuses = [
-            ImageStatus(id="active", name="Active", description="Normal visible image"),
-            ImageStatus(
-                id="rejected",
-                name="Rejected",
-                description="Rejected from burst/duplicate review",
-            ),
-            ImageStatus(
-                id="archived", name="Archived", description="Manually archived by user"
-            ),
-            ImageStatus(
-                id="flagged",
-                name="Flagged",
-                description="Flagged for review or special attention",
-            ),
-        ]
-        db.add_all(statuses)
+    existing_ids = {s.id for s in db.query(ImageStatus).all()}
+    required_statuses = [
+        ImageStatus(id="active", name="Active", description="Normal visible image"),
+        ImageStatus(
+            id="rejected",
+            name="Rejected",
+            description="Rejected from burst/duplicate review",
+        ),
+        ImageStatus(
+            id="archived", name="Archived", description="Manually archived by user"
+        ),
+        ImageStatus(
+            id="flagged",
+            name="Flagged",
+            description="Flagged for review or special attention",
+        ),
+        ImageStatus(
+            id="pending_duplicate",
+            name="Pending Duplicate",
+            description="Near-duplicate detected at hash time, pending review",
+        ),
+    ]
+    to_add = [s for s in required_statuses if s.id not in existing_ids]
+    if to_add:
+        logger.info(f"Adding {len(to_add)} image status record(s)...")
+        db.add_all(to_add)
         db.commit()
-        logger.info(f"Added {len(statuses)} image status records")
+        logger.info(f"Added: {[s.id for s in to_add]}")
     else:
         logger.debug(
             f"ImageStatus table already populated ({db.query(ImageStatus).count()} records)"
@@ -89,6 +96,12 @@ def init_db() -> None:
 
     upgrade_events(engine)
     logger.info("Events schema migration applied")
+
+    # Run skipped_imports migration (idempotent)
+    from .migrations.skipped_imports import upgrade as upgrade_skipped_imports
+
+    upgrade_skipped_imports(engine)
+    logger.info("Skipped imports migration applied")
 
     # Populate reference tables
     db = SessionLocal()

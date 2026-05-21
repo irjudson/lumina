@@ -71,6 +71,8 @@ def finalize_hash_v2(
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Summarize hash computation and seed default thresholds if not set."""
+    from sqlalchemy import text
+
     from lumina.db.connection import get_db_context
     from lumina.db.models import Catalog, DetectionThreshold
 
@@ -105,10 +107,50 @@ def finalize_hash_v2(
             logger.warning(f"Could not seed thresholds: {e}")
             session.rollback()
 
+    # Mark newly-hashed images as pending_duplicate if their dhash_16 is within
+    # hamming distance 8 of any existing image (the near_duplicate threshold).
+    # dhash_16 is stored as a 64-char hex string; cast to bit(256) for XOR.
+    near_dup_marked = 0
+    with get_db_context() as session:
+        try:
+            result = session.execute(
+                text(
+                    """
+                    UPDATE images AS new_img
+                    SET status_id = 'pending_duplicate'
+                    WHERE new_img.catalog_id = CAST(:cat_id AS uuid)
+                      AND new_img.dhash_16 IS NOT NULL
+                      AND new_img.status_id = 'active'
+                      AND EXISTS (
+                          SELECT 1 FROM images existing
+                          WHERE existing.catalog_id = CAST(:cat_id AS uuid)
+                            AND existing.id != new_img.id
+                            AND existing.dhash_16 IS NOT NULL
+                            AND bit_count(
+                                ('x' || new_img.dhash_16)::bit(256)
+                                # ('x' || existing.dhash_16)::bit(256)
+                            ) <= 8
+                      )
+                    """
+                ),
+                {"cat_id": catalog_id},
+            )
+            near_dup_marked = result.rowcount or 0
+            session.commit()
+            if near_dup_marked:
+                logger.info(
+                    f"Near-dedup: marked {near_dup_marked} images as pending_duplicate"
+                    f" for catalog {catalog_id}"
+                )
+        except Exception as e:
+            logger.warning(f"Near-dedup marking failed (non-fatal): {e}")
+            session.rollback()
+
     return {
         "catalog_id": catalog_id,
         "hashed": successes,
         "failed": failures,
+        "near_dup_marked": near_dup_marked,
     }
 
 

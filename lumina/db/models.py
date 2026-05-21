@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship
@@ -730,6 +731,34 @@ class DetectionThreshold(Base):
 
     def __repr__(self) -> str:
         return f"<DetectionThreshold(catalog_id={self.catalog_id}, layer={self.layer}, threshold={self.threshold})>"
+
+
+class SkippedImport(Base):
+    """Record of files skipped at import time because an exact duplicate already exists."""
+
+    __tablename__ = "skipped_imports"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_path = Column(Text, nullable=False)
+    checksum = Column(Text, nullable=False)
+    matched_image_id = Column(Text, nullable=False)
+    skipped_at = Column(DateTime, nullable=False, server_default=text("NOW()"))
+    reviewed_at = Column(DateTime, nullable=True)
+    overridden = Column(Boolean, nullable=False, default=False)
+
+    # Relationships
+    catalog = relationship("Catalog", backref="skipped_imports")
+
+    def __repr__(self) -> str:
+        return (
+            f"<SkippedImport(id={self.id}, source_path={self.source_path},"
+            f" matched={self.matched_image_id})>"
+        )
 
 
 class SuppressionPair(Base):

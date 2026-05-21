@@ -174,6 +174,9 @@ class ImageScannerORM:
         self.files_added = 0
         self.files_updated = 0  # Updated incomplete records
         self.files_skipped = 0
+        self.files_deduplicated = (
+            0  # New files skipped because exact dup exists elsewhere
+        )
         self.files_error = 0
         self.total_bytes = 0
         self.start_time = None
@@ -389,7 +392,42 @@ class ImageScannerORM:
                     self.files_updated += 1
                     logger.debug(f"Updated incomplete record: {file_path}")
                 else:
-                    logger.debug(f"Skipping complete record: {file_path}")
+                    # Different path, same content — a true dedup hit at import time
+                    if str(file_path) != existing.source_path:
+                        logger.debug(
+                            f"Dedup at import: {file_path} matches existing"
+                            f" {existing.source_path}"
+                        )
+                        try:
+                            from sqlalchemy import text as sa_text
+
+                            self.session.execute(
+                                sa_text(
+                                    """
+                                    INSERT INTO skipped_imports
+                                        (catalog_id, source_path, checksum,
+                                         matched_image_id, skipped_at)
+                                    VALUES
+                                        (CAST(:catalog_id AS uuid), :source_path,
+                                         :checksum, :matched_image_id, NOW())
+                                    ON CONFLICT DO NOTHING
+                                    """
+                                ),
+                                {
+                                    "catalog_id": str(self.catalog_id),
+                                    "source_path": str(file_path),
+                                    "checksum": image_record.checksum,
+                                    "matched_image_id": str(existing.id),
+                                },
+                            )
+                            self.session.flush()
+                            self.files_deduplicated += 1
+                        except Exception as exc:
+                            logger.warning(
+                                f"Failed to record skipped import for {file_path}: {exc}"
+                            )
+                    else:
+                        logger.debug(f"Skipping complete record (re-scan): {file_path}")
                     self.files_skipped += 1
                 continue
 
@@ -685,6 +723,7 @@ class ImageScanner:
         self.files_added = self.scanner.files_added
         self.files_updated = self.scanner.files_updated
         self.files_skipped = self.scanner.files_skipped
+        self.files_deduplicated = self.scanner.files_deduplicated
         self.files_error = self.scanner.files_error
         self.total_bytes = self.scanner.total_bytes
 

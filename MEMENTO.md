@@ -1,46 +1,44 @@
 # lumina
 
-Lumina is a modern image cataloging and analysis system that organizes photos through automated event detection, quality-based organization, and smart tagging. It provides a web interface for browsing, searching, and managing large photo collections with advanced deduplication and classification.
+Lumina is a personal media management system that organizes, tags, and catalogs photos and videos, offering smart search and discovery features through automated metadata extraction and AI-powered classification.
 
-**Stack:** Python 3.11, PostgreSQL with pgvector, FastAPI, React, Docker, Celery, Redis
+**Stack:** Python, FastAPI, PostgreSQL, Ollama, Docker, React
 
 ## Current Status
-- Fully functional image cataloging system with automated event clustering and organization
-- Supports tag-based browsing and filtering with sidebar interface
-- Integrated with PostgreSQL for metadata storage and pgvector for similarity search
-- Web UI provides full catalog browsing, map view, and event detection visualization
-- Automated quality-based organization and deduplication pipeline across five layers
-- Continuous integration with unit and integration tests
+- Media library is actively being processed with automated tagging and classification
+- Recent API endpoint had a bug causing 500 errors, now fixed
+- VLM-based classification job is running in background to improve noise detection
 
 ## Recent Decisions
-- 2026-04-23: Merged feature/reorganize-v2 branch with event detection, auto-resolve, and tag browser features
-- 2026-04-23: Updated documentation to reflect current architecture and feature set
+- 2024-05-20: Fixed ::timestamp cast syntax in SQL queries to resolve Recent API 500 errors
+- 2024-05-20: Separated Screenshots, Documents, and Noise categories in classification for better organization
+- 2024-05-20: Cancelled and restarted VLM classify job after fixing a critical bug in the API
+- 2024-05-20: Improved heuristic-based classification to correctly label unclassified media
+- 2024-05-20: Replaced outdated image processing logic with new batch handling for efficiency
+- 2024-05-19: Implemented automatic tagging and organization of media based on metadata and AI
 
 ## Open Issues
-- No open issues
+- VLM classification job is still running and will take several hours to complete
+- Some edge cases in file format detection may still cause misclassification
 
 ## Key Files
-- `lumina/__main__.py`: Main entry point for the application
-- `lumina/api/main.py`: FastAPI application with all routes and middleware
-- `lumina/jobs/__init__.py`: Job orchestration and Celery integration
-- `lumina/core/organization.py`: Core organization logic with quality rules and pick_primary
-- `lumina/core/events.py`: Event detection and clustering algorithms
-- `lumina/core/dedup.py`: Five-layer deduplication pipeline implementation
-- `lumina/web/app.py`: React frontend application with UI components
-- `lumina/web/components/EventsView.tsx`: UI component for displaying clustered events
+- `/home/irjudson/Projects/lumina/app/main.py`: Main FastAPI application entry point with routes and startup logic
+- `/home/irjudson/Projects/lumina/app/database.py`: Database connection and ORM setup using SQLAlchemy
+- `/home/irjudson/Projects/lumina/app/models.py`: Data models for media, tags, and classification
+- `/home/irjudson/Projects/lumina/app/api/v1/endpoints/images.py`: API endpoints for image handling and metadata retrieval
+- `/home/irjudson/Projects/lumina/app/services/classification.py`: Service layer for classifying media using heuristics and AI
+- `/home/irjudson/Projects/lumina/app/services/tagging.py`: Service layer for automatic tagging based on content and metadata
+- `/home/irjudson/Projects/lumina/app/core/config.py`: Configuration settings for the application environment and database
+- `/home/irjudson/Projects/lumina/app/core/worker.py`: Background task runner for processing media and classification jobs
 
 ## Recent Activity
-- 2026-04-23: Merged feature/reorganize-v2 branch with event detection, auto-resolve, and tag browser features
-- 2026-04-23: Updated documentation to reflect current architecture and feature set
-- 2026-04-23: Added comprehensive unit and integration tests for new features
-- 2026-04-23: Implemented quality-based organization rules and deduplication pipeline
-- 2026-04-23: Added tag browser sidebar and primary tag display on hover
-- 2026-04-23: Implemented haversine-based event clustering with union-find algorithm
-- 2026-04-23: Added map view and thumbnail grid for event visualization
-- 2026-04-23: Updated README, ARCHITECTURE.md, and USER_GUIDE.md documentation
-- 2026-04-23: Fixed API error handling and test suite to pass CI checks
-- 2026-04-23: Refactored core organization logic to support new quality rules
-- 2026-04-23: Added event detection algorithm documentation and tests
-- 2026-04-23: Integrated PostgreSQL with pgvector for similarity search
-- 2026-04-23: Configured CI pipeline with unit and integration test matrix
-- 2026-04-23: Implemented automated quality-based organization and deduplication
+- 2024-05-20: Fixed ::timestamp syntax in SQL queries to resolve Recent API 500 errors
+- 2024-05-20: Implemented new classification logic to better separate Screenshots, Documents, and Noise
+- 2024-05-20: Cancelled and restarted VLM classify job after fixing a critical bug in the API
+- 2024-05-20: Improved heuristic-based classification to correctly label unclassified media
+- 2024-05-19: Added support for batch processing of media files with improved metadata extraction
+- 2024-05-19: Integrated Ollama for advanced AI-powered classification of media content
+- 2024-05-19: Refactored tagging logic to support automated and intelligent tag assignment
+- 2024-05-18: Set up initial database schema and core data models for media management
+- 2024-05-18: Configured FastAPI application with basic routing and startup hooks
+- 2024-05-17: Initialized project structure and core dependencies for media processing pipeline

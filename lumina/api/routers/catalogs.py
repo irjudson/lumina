@@ -1715,6 +1715,13 @@ def get_smart_counts(
             SELECT COUNT(*) AS cnt
             FROM events
             WHERE catalog_id = CAST(:catalog_id AS uuid)
+        ),
+        skipped_count AS (
+            SELECT COUNT(*) AS cnt
+            FROM skipped_imports
+            WHERE catalog_id = CAST(:catalog_id AS uuid)
+              AND reviewed_at IS NULL
+              AND overridden = FALSE
         )
         SELECT
             ic.recent,
@@ -1728,10 +1735,12 @@ def get_smart_counts(
             nc.cnt   AS noise,
             rc.cnt   AS rejected,
             nrc.cnt  AS needs_review,
-            ec.cnt   AS events
+            ec.cnt   AS events,
+            skc.cnt  AS skipped_imports
         FROM image_counts ic, burst_count bc, duplicate_count dc,
              screenshot_count sc, document_count docc, noise_count nc,
-             rejected_count rc, needs_review_count nrc, event_count ec
+             rejected_count rc, needs_review_count nrc, event_count ec,
+             skipped_count skc
         """
     )
 
@@ -1754,6 +1763,9 @@ def get_smart_counts(
             int(row.needs_review) if row and row.needs_review is not None else 0
         ),
         "events": int(row.events) if row and row.events is not None else 0,
+        "skipped_imports": (
+            int(row.skipped_imports) if row and row.skipped_imports is not None else 0
+        ),
     }
 
 
@@ -4085,3 +4097,164 @@ def list_event_images(
         )
 
     return {"images": images, "total": len(images)}
+
+
+# =============================================================================
+# Skipped Imports Endpoints
+# =============================================================================
+
+
+@router.get("/{catalog_id}/skipped-imports")
+def get_skipped_imports(
+    catalog_id: uuid.UUID,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """
+    Return paginated list of files skipped at import time due to exact duplicates.
+
+    Each item includes the skipped file path plus info about the matched image.
+    """
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    catalog_id_str = str(catalog_id)
+
+    total_row = db.execute(
+        text(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM skipped_imports
+            WHERE catalog_id = CAST(:cid AS uuid)
+        """
+        ),
+        {"cid": catalog_id_str},
+    ).fetchone()
+    total = int(total_row.cnt) if total_row else 0
+
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                si.id,
+                si.source_path,
+                si.checksum,
+                si.matched_image_id,
+                si.skipped_at,
+                si.reviewed_at,
+                si.overridden,
+                i.source_path  AS matched_source_path,
+                i.thumbnail_path AS matched_thumbnail_path,
+                i.dates        AS matched_dates
+            FROM skipped_imports si
+            LEFT JOIN images i ON i.id = si.matched_image_id
+            WHERE si.catalog_id = CAST(:cid AS uuid)
+            ORDER BY si.skipped_at DESC
+            LIMIT :limit OFFSET :offset
+        """
+        ),
+        {"cid": catalog_id_str, "limit": limit, "offset": offset},
+    ).fetchall()
+
+    items = []
+    for r in rows:
+        matched_image = None
+        if r.matched_source_path is not None:
+            matched_image = {
+                "id": r.matched_image_id,
+                "source_path": r.matched_source_path,
+                "thumbnail_path": r.matched_thumbnail_path,
+                "dates": r.matched_dates,
+            }
+        items.append(
+            {
+                "id": str(r.id),
+                "source_path": r.source_path,
+                "checksum": r.checksum,
+                "matched_image_id": r.matched_image_id,
+                "skipped_at": r.skipped_at.isoformat() if r.skipped_at else None,
+                "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+                "overridden": r.overridden,
+                "matched_image": matched_image,
+            }
+        )
+
+    return {"items": items, "total": total}
+
+
+@router.post("/{catalog_id}/skipped-imports/{skip_id}/override")
+def override_skipped_import(
+    catalog_id: uuid.UUID,
+    skip_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Mark a skipped-import record as overridden (user wants to import it anyway).
+
+    Sets overridden=true and reviewed_at=now(). Does not perform the actual import.
+    """
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    row = db.execute(
+        text(
+            """
+            UPDATE skipped_imports
+            SET overridden = TRUE, reviewed_at = NOW()
+            WHERE id = CAST(:skip_id AS uuid)
+              AND catalog_id = CAST(:cid AS uuid)
+            RETURNING id, source_path, checksum, matched_image_id,
+                      skipped_at, reviewed_at, overridden
+        """
+        ),
+        {"skip_id": str(skip_id), "cid": str(catalog_id)},
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Skipped import record not found")
+
+    db.commit()
+
+    return {
+        "id": str(row.id),
+        "source_path": row.source_path,
+        "checksum": row.checksum,
+        "matched_image_id": row.matched_image_id,
+        "skipped_at": row.skipped_at.isoformat() if row.skipped_at else None,
+        "reviewed_at": row.reviewed_at.isoformat() if row.reviewed_at else None,
+        "overridden": row.overridden,
+    }
+
+
+@router.post("/{catalog_id}/skipped-imports/dismiss-all")
+def dismiss_all_skipped_imports(
+    catalog_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """
+    Mark all unreviewed skipped-import records for this catalog as reviewed.
+
+    Sets reviewed_at=now() on all records where reviewed_at IS NULL.
+    """
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    result = db.execute(
+        text(
+            """
+            UPDATE skipped_imports
+            SET reviewed_at = NOW()
+            WHERE catalog_id = CAST(:cid AS uuid)
+              AND reviewed_at IS NULL
+        """
+        ),
+        {"cid": str(catalog_id)},
+    )
+    dismissed = result.rowcount or 0
+    db.commit()
+
+    return {"dismissed": dismissed}

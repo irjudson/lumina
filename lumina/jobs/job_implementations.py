@@ -80,6 +80,7 @@ def scan_analyze_job(ctx: JobContext) -> Dict[str, Any]:
                 "files_added": scanner.files_added,
                 "files_updated": scanner.files_updated,
                 "files_skipped": scanner.files_skipped,
+                "files_deduplicated": scanner.files_deduplicated,
                 "files_error": scanner.files_error,
                 "total_bytes": scanner.total_bytes,
                 "catalog_id": ctx.catalog_id,
