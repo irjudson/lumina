@@ -296,6 +296,10 @@ def list_catalog_images(
     # Size filter
     min_size_bytes: int = Query(None, description="Minimum file size in bytes"),
     max_size_bytes: int = Query(None, description="Maximum file size in bytes"),
+    # Collection filter
+    collection_id: str = Query(
+        None, description="Filter images belonging to a specific collection"
+    ),
     # Status filter
     status: str = Query(
         None,
@@ -485,6 +489,14 @@ def list_catalog_images(
     if max_size_bytes is not None:
         conditions.append("size_bytes <= :max_size_bytes")
         params["max_size_bytes"] = max_size_bytes
+
+    # Collection filter
+    if collection_id:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM collection_images ci "
+            "WHERE ci.image_id = images.id AND ci.collection_id = CAST(:collection_id AS uuid))"
+        )
+        params["collection_id"] = collection_id
 
     # Status filter
     valid_statuses = {"active", "rejected", "archived", "flagged"}

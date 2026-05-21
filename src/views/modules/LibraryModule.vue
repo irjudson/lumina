@@ -827,15 +827,6 @@ const displayedImages = computed(() => {
     images = images.filter(img => favoritesStore.isFavorite(img.id))
   }
 
-  // Apply collection filter
-  if (currentView.value.startsWith('collection:')) {
-    const collectionId = currentView.value.substring('collection:'.length)
-    const collection = collectionsStore.getCollection(collectionId)
-    if (collection) {
-      images = images.filter(img => collection.imageIds.includes(img.id))
-    }
-  }
-
   return images
 })
 
@@ -1011,6 +1002,9 @@ async function handleNavigate(view: string) {
       if (view.startsWith('collection:')) {
         const collectionId = view.substring('collection:'.length)
         collectionsStore.activeCollectionId = collectionId
+        if (catalogStore.activeCatalog) {
+          libraryStore.setFilter({ collectionId })
+        }
       } else {
         console.log('Unknown view:', view)
       }

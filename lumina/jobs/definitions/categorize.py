@@ -14,8 +14,11 @@ Detection signals:
   Personal   — evenings 7pm-11pm or weekends + camera EXIF + not noise
 """
 
+import json
 import logging
 import math
+import time
+import urllib.request
 import uuid
 from collections import Counter
 from datetime import date, timedelta
@@ -275,29 +278,67 @@ def _categorize_archival(catalog_id: str, archival_id: str) -> Dict[str, int]:
 # ─────────────────────────── Travel ───────────────────────────
 
 
-def _trip_name(start: date, end: date) -> str:
-    """Human-readable trip name from date range."""
-    months = [
-        "Jan",
-        "Feb",
-        "Mar",
-        "Apr",
-        "May",
-        "Jun",
-        "Jul",
-        "Aug",
-        "Sep",
-        "Oct",
-        "Nov",
-        "Dec",
-    ]
+_MONTHS = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+]
+
+_geocode_cache: Dict[str, Optional[str]] = {}
+
+
+def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
+    """Return city/town name for coordinates via Nominatim. Returns None on failure."""
+    key = f"{lat:.2f},{lon:.2f}"
+    if key in _geocode_cache:
+        return _geocode_cache[key]
+    url = (
+        f"https://nominatim.openstreetmap.org/reverse"
+        f"?format=json&lat={lat:.6f}&lon={lon:.6f}&zoom=10"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Lumina/2.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        addr = data.get("address", {})
+        city = (
+            addr.get("city")
+            or addr.get("town")
+            or addr.get("village")
+            or addr.get("county")
+        )
+        _geocode_cache[key] = city
+        return city
+    except Exception:
+        _geocode_cache[key] = None
+        return None
+
+
+def _trip_name(start: date, end: date, location: Optional[str] = None) -> str:
+    """Human-readable trip name. Prepends location when available."""
     if start.year == end.year:
         if start.month == end.month:
-            return f"{months[start.month - 1]} {start.day}–{end.day}, {start.year}"
-        return f"{months[start.month - 1]}–{months[end.month - 1]} {start.year}"
-    return (
-        f"{months[start.month - 1]} {start.year} – {months[end.month - 1]} {end.year}"
-    )
+            date_part = (
+                f"{_MONTHS[start.month - 1]} {start.day}–{end.day}, {start.year}"
+            )
+        else:
+            date_part = (
+                f"{_MONTHS[start.month - 1]}–{_MONTHS[end.month - 1]} {start.year}"
+            )
+    else:
+        date_part = f"{_MONTHS[start.month - 1]} {start.year} – {_MONTHS[end.month - 1]} {end.year}"
+    if location:
+        return f"{location} – {date_part}"
+    return date_part
 
 
 def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
@@ -363,9 +404,12 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
         return {"total": 0}
 
     # Step 2: group consecutive travel days into trips (gap <= TRIP_MAX_GAP_DAYS)
-    by_date: Dict[date, List[str]] = {}
+    # Store (image_id, lat, lon) per day for centroid lookup
+    by_date: Dict[date, List[Tuple[str, float, float]]] = {}
     for img in travel_images:
-        by_date.setdefault(img["ts"].date(), []).append(img["id"])
+        by_date.setdefault(img["ts"].date(), []).append(
+            (img["id"], img["lat"], img["lon"])
+        )
 
     sorted_days = sorted(by_date.keys())
     trips: List[List[date]] = []
@@ -383,11 +427,21 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
     for trip_days in trips:
         start_d, end_d = trip_days[0], trip_days[-1]
         sys_key = f"travel_trip:{start_d.isoformat()}_{end_d.isoformat()}"
-        name = _trip_name(start_d, end_d)
+
+        # Compute trip centroid and reverse-geocode for a location name
+        all_pts = [(lat, lon) for d in trip_days for _, lat, lon in by_date.get(d, [])]
+        location: Optional[str] = None
+        if all_pts:
+            c = _centroid(all_pts)
+            if c:
+                location = _reverse_geocode_city(c[0], c[1])
+                time.sleep(1.1)  # Nominatim rate limit: 1 req/s
+
+        name = _trip_name(start_d, end_d, location)
         sub_id = _ensure_subcollection(
             catalog_id, travel_id, sys_key, name, f"Trip detected {start_d} – {end_d}"
         )
-        ids = [i for d in trip_days for i in by_date.get(d, [])]
+        ids = [img_id for d in trip_days for img_id, _, _ in by_date.get(d, [])]
         n = _upsert_memberships(catalog_id, sub_id, ids, 0.80)
         trip_count += n
         logger.info(f"Travel trip '{name}': {n} images")
