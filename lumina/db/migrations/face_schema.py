@@ -22,6 +22,19 @@ _STATEMENTS = [
         detected_at TIMESTAMP NOT NULL DEFAULT NOW()
     )
     """,
+    # Repair tables created before DEFAULT gen_random_uuid() was added
+    """
+    DO $$
+    BEGIN
+        IF EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'faces' AND column_name = 'id'
+              AND column_default IS NULL
+        ) THEN
+            ALTER TABLE faces ALTER COLUMN id SET DEFAULT gen_random_uuid();
+        END IF;
+    END $$
+    """,
     "CREATE INDEX IF NOT EXISTS idx_faces_catalog_id ON faces(catalog_id)",
     "CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id)",
     "CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_collection_id) WHERE person_collection_id IS NOT NULL",
