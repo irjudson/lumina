@@ -1,6 +1,7 @@
 """Collections API router.
 
-CRUD operations for user-created photo collections and system-managed categories.
+CRUD for user-created photo collections and system-managed categories.
+Supports a 2-level hierarchy: top-level categories → sub-collections (trips, buckets, etc.)
 """
 
 import uuid
@@ -24,6 +25,7 @@ router = APIRouter()
 class CreateCollectionRequest(BaseModel):
     name: str
     description: Optional[str] = None
+    parent_id: Optional[str] = None
 
 
 class UpdateCollectionRequest(BaseModel):
@@ -39,8 +41,10 @@ class CollectionListItem(BaseModel):
     cover_image_id: Optional[str] = None
     image_count: int
     pending_count: int
+    child_count: int
     source: str
     system_key: Optional[str] = None
+    parent_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -56,6 +60,7 @@ class CollectionDetail(BaseModel):
     image_ids: List[str]
     source: str
     system_key: Optional[str] = None
+    parent_id: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
@@ -102,18 +107,32 @@ def _get_collection_or_404(
     return collection
 
 
+def _child_counts(db: Session, catalog_id: uuid.UUID) -> dict:
+    """Return {parent_id_str: child_count} for all collections in catalog."""
+    rows = (
+        db.query(Collection.parent_id, func.count(Collection.id))
+        .filter(Collection.catalog_id == catalog_id, Collection.parent_id.isnot(None))
+        .group_by(Collection.parent_id)
+        .all()
+    )
+    return {str(row[0]): row[1] for row in rows}
+
+
 # --- Endpoints ---
 
 
 @router.get("/{catalog_id}/collections", response_model=List[CollectionListItem])
 def list_collections(
     catalog_id: uuid.UUID,
+    parent_id: Optional[str] = None,
     db: Session = Depends(get_db),
 ) -> List[CollectionListItem]:
-    """List all collections in a catalog with image counts."""
+    """List collections. Use ?parent_id=<uuid> to list children, omit for top-level only."""
     _get_catalog_or_404(db, catalog_id)
 
-    results = (
+    counts = _child_counts(db, catalog_id)
+
+    q = (
         db.query(
             Collection,
             func.count(CollectionImage.id).label("image_count"),
@@ -123,28 +142,36 @@ def list_collections(
         )
         .outerjoin(CollectionImage, CollectionImage.collection_id == Collection.id)
         .filter(Collection.catalog_id == catalog_id)
-        .group_by(Collection.id)
+    )
+
+    if parent_id is not None:
+        q = q.filter(Collection.parent_id == uuid.UUID(parent_id))
+    else:
+        q = q.filter(Collection.parent_id.is_(None))
+
+    results = (
+        q.group_by(Collection.id)
         .order_by(Collection.source.desc(), Collection.updated_at.desc())
         .all()
     )
 
-    items = []
-    for c, count, pending in results:
-        items.append(
-            CollectionListItem(
-                id=str(c.id),
-                name=c.name,
-                description=c.description,
-                cover_image_id=c.cover_image_id,
-                image_count=count,
-                pending_count=int(pending or 0),
-                source=c.source,
-                system_key=c.system_key,
-                created_at=c.created_at,
-                updated_at=c.updated_at,
-            )
+    return [
+        CollectionListItem(
+            id=str(c.id),
+            name=c.name,
+            description=c.description,
+            cover_image_id=c.cover_image_id,
+            image_count=count,
+            pending_count=int(pending or 0),
+            child_count=counts.get(str(c.id), 0),
+            source=c.source,
+            system_key=c.system_key,
+            parent_id=str(c.parent_id) if c.parent_id else None,
+            created_at=c.created_at,
+            updated_at=c.updated_at,
         )
-    return items
+        for c, count, pending in results
+    ]
 
 
 @router.post("/{catalog_id}/collections", response_model=CollectionDetail)
@@ -153,14 +180,24 @@ def create_collection(
     request: CreateCollectionRequest,
     db: Session = Depends(get_db),
 ) -> CollectionDetail:
-    """Create a new user collection."""
+    """Create a new user collection. Optionally specify parent_id for a sub-collection."""
     _get_catalog_or_404(db, catalog_id)
+
+    parent_uuid = None
+    if request.parent_id:
+        parent = _get_collection_or_404(db, catalog_id, uuid.UUID(request.parent_id))
+        if parent.parent_id is not None:
+            raise HTTPException(
+                status_code=400, detail="Collections are limited to 2 levels deep."
+            )
+        parent_uuid = parent.id
 
     collection = Collection(
         catalog_id=catalog_id,
         name=request.name,
         description=request.description,
         source="user",
+        parent_id=parent_uuid,
     )
     db.add(collection)
     db.commit()
@@ -174,6 +211,7 @@ def create_collection(
         image_ids=[],
         source=collection.source,
         system_key=collection.system_key,
+        parent_id=str(collection.parent_id) if collection.parent_id else None,
         created_at=collection.created_at,
         updated_at=collection.updated_at,
     )
@@ -209,6 +247,7 @@ def get_collection(
         image_ids=image_ids,
         source=collection.source,
         system_key=collection.system_key,
+        parent_id=str(collection.parent_id) if collection.parent_id else None,
         created_at=collection.created_at,
         updated_at=collection.updated_at,
     )
@@ -256,6 +295,7 @@ def update_collection(
         image_ids=image_ids,
         source=collection.source,
         system_key=collection.system_key,
+        parent_id=str(collection.parent_id) if collection.parent_id else None,
         created_at=collection.created_at,
         updated_at=collection.updated_at,
     )
@@ -267,12 +307,12 @@ def delete_collection(
     collection_id: uuid.UUID,
     db: Session = Depends(get_db),
 ) -> dict:
-    """Delete a collection (does not delete images). System collections cannot be deleted."""
+    """Delete a collection. Top-level system categories cannot be deleted."""
     collection = _get_collection_or_404(db, catalog_id, collection_id)
-    if collection.source == "system":
+    if collection.source == "system" and collection.parent_id is None:
         raise HTTPException(
             status_code=409,
-            detail="System collections cannot be deleted. Clear their images instead.",
+            detail="Top-level system categories cannot be deleted.",
         )
     db.delete(collection)
     db.commit()
@@ -380,7 +420,7 @@ def confirm_memberships(
     request: ConfirmMembershipsRequest,
     db: Session = Depends(get_db),
 ) -> dict:
-    """Confirm AI-suggested memberships for a system collection."""
+    """Confirm AI-suggested memberships."""
     _get_collection_or_404(db, catalog_id, collection_id)
 
     updated = (

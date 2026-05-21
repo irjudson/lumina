@@ -156,8 +156,10 @@ export interface CollectionListItem {
   cover_image_id?: string
   image_count: number
   pending_count: number
+  child_count: number
   source: 'user' | 'system'
   system_key?: string | null
+  parent_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -170,6 +172,7 @@ export interface CollectionDetail {
   image_ids: string[]
   source: 'user' | 'system'
   system_key?: string | null
+  parent_id?: string | null
   created_at: string
   updated_at: string
 }
@@ -435,8 +438,9 @@ class ApiClient {
 
   // --- Collections ---
 
-  async getCollections(catalogId: string): Promise<CollectionListItem[]> {
-    const response = await this.client.get<CollectionListItem[]>(`/catalogs/${catalogId}/collections`)
+  async getCollections(catalogId: string, parentId?: string): Promise<CollectionListItem[]> {
+    const params = parentId ? { parent_id: parentId } : {}
+    const response = await this.client.get<CollectionListItem[]>(`/catalogs/${catalogId}/collections`, { params })
     return response.data
   }
 

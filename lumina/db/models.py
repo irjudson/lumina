@@ -460,6 +460,12 @@ class Collection(Base):
     source = Column(String(16), nullable=False, default="user", server_default="user")
     # Stable identifier for system categories (null for user collections)
     system_key = Column(Text, nullable=True)
+    # Parent collection for 2-level hierarchy (null = top-level)
+    parent_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("collections.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -471,6 +477,7 @@ class Collection(Base):
     collection_images = relationship(
         "CollectionImage", back_populates="collection", cascade="all, delete-orphan"
     )
+    parent = relationship("Collection", remote_side="Collection.id", backref="children")
 
     def __repr__(self) -> str:
         return f"<Collection(id={self.id}, name={self.name})>"
@@ -767,6 +774,42 @@ class SkippedImport(Base):
             f"<SkippedImport(id={self.id}, source_path={self.source_path},"
             f" matched={self.matched_image_id})>"
         )
+
+
+class Face(Base):
+    """A detected face within an image."""
+
+    __tablename__ = "faces"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid_module.uuid4)
+    catalog_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("catalogs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    image_id = Column(
+        String, ForeignKey("images.id", ondelete="CASCADE"), nullable=False
+    )
+    # Bounding box (pixel coordinates)
+    bbox_x = Column(Float, nullable=False)
+    bbox_y = Column(Float, nullable=False)
+    bbox_w = Column(Float, nullable=False)
+    bbox_h = Column(Float, nullable=False)
+    detection_score = Column(Float, nullable=False)
+    embedding = Column(Vector(512), nullable=True)
+    person_collection_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("collections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    catalog = relationship("Catalog", backref="faces")
+    image = relationship("Image", backref="faces")
+    person_collection = relationship("Collection", foreign_keys=[person_collection_id])
+
+    def __repr__(self) -> str:
+        return f"<Face(id={self.id}, image={self.image_id}, score={self.detection_score:.2f})>"
 
 
 class SuppressionPair(Base):

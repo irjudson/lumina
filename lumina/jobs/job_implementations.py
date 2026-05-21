@@ -2209,6 +2209,8 @@ def detect_events_job(ctx: Any) -> Dict[str, Any]:
 
 
 from .definitions.categorize import categorize_images_job  # noqa: E402
+from .definitions.cluster_faces import cluster_faces_job  # noqa: E402
+from .definitions.detect_faces import detect_faces_job  # noqa: E402
 from .definitions.score_quality import score_quality_job  # noqa: E402
 
 JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
@@ -2229,4 +2231,6 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "detect_events": detect_events_job,
     "score_quality": score_quality_job,
     "categorize_images": categorize_images_job,
+    "detect_faces": detect_faces_job,
+    "cluster_faces": cluster_faces_job,
 }

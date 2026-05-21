@@ -71,6 +71,11 @@ RUN pip install --no-cache-dir \
     open-clip-torch>=2.24.0 \
     ftfy>=6.1.0 \
     ollama>=0.3.0
+RUN pip install --no-cache-dir \
+    insightface>=0.7.3 \
+    onnxruntime-gpu \
+    scikit-learn>=1.3.0 \
+    opencv-python-headless>=4.8.0
 
 # Stage 1: Build Frontend
 FROM node:20-alpine as frontend-build

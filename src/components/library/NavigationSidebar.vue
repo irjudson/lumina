@@ -161,7 +161,7 @@
         </div>
       </nav>
 
-      <!-- Categories (system collections, collapsible) -->
+      <!-- Categories (system collections, collapsible 2-level tree) -->
       <nav v-if="systemCollections.length > 0" class="border-t border-gray-800 mt-2">
         <button
           @click="categoriesOpen = !categoriesOpen"
@@ -170,26 +170,63 @@
           <span>Categories</span>
           <ChevronDownIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-180': categoriesOpen }" />
         </button>
-        <div v-if="categoriesOpen" class="px-3 pb-2 space-y-1">
-          <div
-            v-for="col in systemCollections"
-            :key="col.id"
-            class="flex items-center gap-1"
-          >
-            <NavItem
-              icon="Layers"
-              :label="col.name"
-              :count="col.imageCount"
-              :active="activeView === `collection:${col.id}`"
-              class="flex-1 min-w-0"
-              @click="$emit('navigate', `collection:${col.id}`)"
-            />
-            <span
-              v-if="col.pendingCount > 0"
-              class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
-              :title="`${col.pendingCount} unreviewed suggestions`"
-            >{{ col.pendingCount }}</span>
-          </div>
+        <div v-if="categoriesOpen" class="px-3 pb-2 space-y-0.5">
+          <template v-for="col in systemCollections" :key="col.id">
+            <!-- Category row -->
+            <div class="flex items-center gap-1">
+              <!-- expand/collapse toggle when it has children -->
+              <button
+                v-if="col.childCount > 0"
+                @click.stop="toggleExpanded(col.id)"
+                class="shrink-0 p-1 text-gray-600 hover:text-gray-400 transition-colors"
+                :title="expandedCategories.has(col.id) ? 'Collapse' : 'Expand'"
+              >
+                <ChevronRightIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-90': expandedCategories.has(col.id) }" />
+              </button>
+              <span v-else class="w-5 shrink-0" />
+              <NavItem
+                icon="Layers"
+                :label="col.name"
+                :count="col.imageCount || undefined"
+                :active="activeView === `collection:${col.id}`"
+                class="flex-1 min-w-0"
+                @click="$emit('navigate', `collection:${col.id}`)"
+              />
+              <span
+                v-if="col.pendingCount > 0"
+                class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+                :title="`${col.pendingCount} unreviewed suggestions`"
+              >{{ col.pendingCount }}</span>
+            </div>
+            <!-- Children (shown when expanded) -->
+            <div
+              v-if="expandedCategories.has(col.id)"
+              class="pl-5 space-y-0.5"
+            >
+              <template v-for="child in childrenOf(col.id)" :key="child.id">
+                <div class="flex items-center gap-1">
+                  <NavItem
+                    icon="Folder"
+                    :label="child.name"
+                    :count="child.imageCount || undefined"
+                    :active="activeView === `collection:${child.id}`"
+                    class="flex-1 min-w-0"
+                    @click="$emit('navigate', `collection:${child.id}`)"
+                  />
+                  <span
+                    v-if="child.pendingCount > 0"
+                    class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+                    :title="`${child.pendingCount} unreviewed`"
+                  >{{ child.pendingCount }}</span>
+                </div>
+              </template>
+              <!-- Loading indicator if children not yet loaded -->
+              <p
+                v-if="childrenOf(col.id).length === 0 && col.childCount > 0"
+                class="text-xs text-gray-600 px-3 py-1"
+              >Loading…</p>
+            </div>
+          </template>
         </div>
       </nav>
 
@@ -260,6 +297,7 @@ import {
   FileWarning as FileWarningIcon,
   PartyPopper as PartyPopperIcon,
   ChevronDown as ChevronDownIcon,
+  ChevronRight as ChevronRightIcon,
   BarChart2 as BarChart2Icon,
   Layers as LayersIcon,
 } from 'lucide-vue-next'
@@ -323,17 +361,38 @@ const props = withDefaults(defineProps<Props>(), {
   selectedTags: () => [],
 })
 
-defineEmits<{
+const emit = defineEmits<{
   navigate: [view: string]
   'open-settings': []
   'create-collection': []
   'filter-tags': [tags: string[]]
+  'load-children': [parentId: string]
 }>()
 
+// Top-level system categories (no parent)
 const systemCollections = computed(() =>
-  (props.collections ?? []).filter(c => c.source === 'system')
+  (props.collections ?? []).filter(c => c.source === 'system' && !c.parentId)
 )
+// User collections (no parent)
 const userCollections = computed(() =>
-  (props.collections ?? []).filter(c => c.source !== 'system')
+  (props.collections ?? []).filter(c => c.source !== 'system' && !c.parentId)
 )
+
+// Which categories are currently expanded
+const expandedCategories = ref<Set<string>>(new Set())
+
+function toggleExpanded(id: string) {
+  if (expandedCategories.value.has(id)) {
+    expandedCategories.value.delete(id)
+  } else {
+    expandedCategories.value.add(id)
+    emit('load-children', id)
+  }
+  // Trigger reactivity
+  expandedCategories.value = new Set(expandedCategories.value)
+}
+
+function childrenOf(parentId: string): Collection[] {
+  return (props.collections ?? []).filter(c => c.parentId === parentId)
+}
 </script>

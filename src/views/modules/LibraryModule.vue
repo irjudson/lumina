@@ -23,6 +23,7 @@
             @open-settings="showSettings = true"
             @create-collection="showCreateCollection = true"
             @filter-tags="handleTagFilter"
+            @load-children="collectionsStore.loadChildren"
           />
         </LeftPanel>
       </template>

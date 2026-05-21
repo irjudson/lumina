@@ -1,17 +1,24 @@
-"""Categorize images into system collections.
+"""Categorize images into system collections with 2-level hierarchy.
 
-Signals used per category:
+Top-level system categories (seeded at startup):
+  Travel            → sub-collections: one per detected trip
+  Family & Personal → sub-collections: decade buckets (1990s, 2000s, …)
+  Work & Professional → sub-collections: Documents, Screenshots
+  Archival          → sub-collections: Pre-1980, 1980s, 1990s
+  Projects          → manual only
 
-  Travel            — GPS clusters sustained >100 km from surrounding 30-day window centroid
-  Family & Personal — weekends or evenings (7pm-11pm) + has camera EXIF + not noise
-  Work & Professional — content_class document/screenshot OR weekday business hours + camera EXIF
-  Archival          — capture_time before 2000-01-01
-  Projects          — manual only, no auto-detection
+Detection signals:
+  Travel     — GPS clusters >150 km from surrounding 30-day window centroid
+  Archival   — capture_time before 2000-01-01
+  Work       — content_class document/screenshot OR weekday 8am-6pm + camera EXIF
+  Personal   — evenings 7pm-11pm or weekends + camera EXIF + not noise
 """
 
 import logging
 import math
-from datetime import timedelta
+import uuid
+from collections import Counter
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
@@ -22,18 +29,20 @@ from ..types import JobContext
 
 logger = logging.getLogger(__name__)
 
-# Minimum number of images in a day to consider it a "travel day"
-TRAVEL_MIN_IMAGES_PER_DAY = 2
-# Distance threshold to flag as travel (km)
+# Travel thresholds
 TRAVEL_DISTANCE_KM = 150
-# Window for computing "normal" location centroid (days each side)
 TRAVEL_WINDOW_DAYS = 30
-# Content classes that indicate noise (exclude from Family & Work signals)
+TRAVEL_MIN_IMAGES_PER_DAY = 2
+TRIP_MAX_GAP_DAYS = 3  # days without photos before a new trip starts
+
+# Content classes that indicate noise
 NOISE_CLASSES = {"invalid", "meme", "received", "social_media"}
 
 
+# ─────────────────────────── Geometry helpers ───────────────────────────
+
+
 def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance in kilometres."""
     R = 6371.0
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -54,107 +63,181 @@ def _centroid(points: List[Tuple[float, float]]) -> Optional[Tuple[float, float]
     )
 
 
+# ─────────────────────────── Sub-collection upsert ───────────────────────────
+
+
+def _ensure_subcollection(
+    catalog_id: str,
+    parent_id: str,
+    system_key: str,
+    name: str,
+    description: str = "",
+) -> str:
+    """Get or create a system sub-collection by system_key. Returns collection id."""
+    with get_db_context() as db:
+        row = db.execute(
+            text(
+                "SELECT id FROM collections "
+                "WHERE catalog_id = CAST(:cid AS uuid) AND system_key = :key"
+            ),
+            {"cid": catalog_id, "key": system_key},
+        ).fetchone()
+        if row:
+            return str(row[0])
+        new_id = str(uuid.uuid4())
+        db.execute(
+            text(
+                """
+                INSERT INTO collections
+                    (id, catalog_id, name, description, source, system_key, parent_id,
+                     created_at, updated_at)
+                VALUES
+                    (CAST(:id AS uuid), CAST(:cid AS uuid), :name, :desc,
+                     'system', :key, CAST(:pid AS uuid), NOW(), NOW())
+                """
+            ),
+            {
+                "id": new_id,
+                "cid": catalog_id,
+                "name": name,
+                "desc": description,
+                "key": system_key,
+                "pid": parent_id,
+            },
+        )
+        db.commit()
+        return new_id
+
+
+# ─────────────────────────── Membership upsert ───────────────────────────
+
+
+def _upsert_memberships(
+    catalog_id: str, collection_id: str, image_ids: List[str], confidence: float
+) -> int:
+    """Insert AI-suggested memberships (confirmed=False) skipping existing rows."""
+    if not image_ids:
+        return 0
+    with get_db_context() as db:
+        existing = {
+            r[0]
+            for r in db.execute(
+                text(
+                    "SELECT image_id FROM collection_images "
+                    "WHERE collection_id = CAST(:cid AS uuid)"
+                ),
+                {"cid": collection_id},
+            ).fetchall()
+        }
+        to_insert = [i for i in image_ids if i not in existing]
+        if not to_insert:
+            return 0
+        db.execute(
+            text(
+                """
+                INSERT INTO collection_images
+                    (id, collection_id, image_id, position, added_at,
+                     confidence, confirmed, source)
+                SELECT
+                    gen_random_uuid(),
+                    CAST(:cid AS uuid),
+                    unnest(CAST(:ids AS text[])),
+                    0, NOW(), :conf, false, 'system'
+                ON CONFLICT (collection_id, image_id) DO NOTHING
+                """
+            ),
+            {"cid": collection_id, "ids": to_insert, "conf": confidence},
+        )
+        db.commit()
+        return len(to_insert)
+
+
+# ─────────────────────────── Main entry point ───────────────────────────
+
+
 def categorize_images_job(ctx: JobContext) -> Dict[str, Any]:
-    """Main entry point: assign images to system collections."""
     catalog_id = ctx.catalog_id
 
     update_job_status(
         ctx.job_id,
         "PROGRESS",
-        progress={"percent": 0, "message": "Loading catalog data"},
+        progress={"percent": 0, "message": "Loading system collections"},
     )
 
     with get_db_context() as db:
-        # Fetch collection IDs for all system keys in this catalog
         rows = db.execute(
             text(
                 "SELECT system_key, id FROM collections "
-                "WHERE catalog_id = CAST(:cid AS uuid) AND system_key IS NOT NULL"
+                "WHERE catalog_id = CAST(:cid AS uuid) AND system_key IS NOT NULL "
+                "AND parent_id IS NULL"
             ),
             {"cid": catalog_id},
         ).fetchall()
-        sys_collections: Dict[str, str] = {r[0]: str(r[1]) for r in rows}
+        sys_cols: Dict[str, str] = {r[0]: str(r[1]) for r in rows}
 
-    if not sys_collections:
-        logger.warning(
-            f"No system collections for catalog {catalog_id} — seeding skipped"
-        )
+    if not sys_cols:
         return {"error": "no_system_collections"}
 
-    results: Dict[str, int] = {}
-
-    if should_stop_job(ctx.job_id):
-        return {"cancelled": True}
+    results: Dict[str, Any] = {}
 
     # --- Archival ---
-    if "archival" in sys_collections:
+    if "archival" in sys_cols and not should_stop_job(ctx.job_id):
         update_job_status(
             ctx.job_id,
             "PROGRESS",
             progress={"percent": 10, "message": "Detecting archival photos"},
         )
-        n = _categorize_archival(catalog_id, sys_collections["archival"])
-        results["archival"] = n
-        logger.info(f"Archival: {n} images")
-
-    if should_stop_job(ctx.job_id):
-        return {"cancelled": True}
+        results["archival"] = _categorize_archival(catalog_id, sys_cols["archival"])
 
     # --- Travel ---
-    if "travel" in sys_collections:
+    if "travel" in sys_cols and not should_stop_job(ctx.job_id):
         update_job_status(
             ctx.job_id,
             "PROGRESS",
             progress={"percent": 25, "message": "Detecting travel"},
         )
-        n = _categorize_travel(catalog_id, sys_collections["travel"])
-        results["travel"] = n
-        logger.info(f"Travel: {n} images")
+        results["travel"] = _categorize_travel(catalog_id, sys_cols["travel"])
 
-    if should_stop_job(ctx.job_id):
-        return {"cancelled": True}
-
-    # --- Work & Professional ---
-    if "work_professional" in sys_collections:
+    # --- Work ---
+    if "work_professional" in sys_cols and not should_stop_job(ctx.job_id):
         update_job_status(
             ctx.job_id,
             "PROGRESS",
-            progress={"percent": 55, "message": "Detecting work content"},
+            progress={"percent": 60, "message": "Detecting work content"},
         )
-        n = _categorize_work(catalog_id, sys_collections["work_professional"])
-        results["work_professional"] = n
-        logger.info(f"Work & Professional: {n} images")
-
-    if should_stop_job(ctx.job_id):
-        return {"cancelled": True}
+        results["work"] = _categorize_work(catalog_id, sys_cols["work_professional"])
 
     # --- Family & Personal ---
-    if "family_personal" in sys_collections:
+    if "family_personal" in sys_cols and not should_stop_job(ctx.job_id):
         update_job_status(
             ctx.job_id,
             "PROGRESS",
-            progress={"percent": 75, "message": "Detecting personal moments"},
+            progress={"percent": 80, "message": "Detecting personal moments"},
         )
-        n = _categorize_family_personal(catalog_id, sys_collections["family_personal"])
-        results["family_personal"] = n
-        logger.info(f"Family & Personal: {n} images")
+        results["family"] = _categorize_family(catalog_id, sys_cols["family_personal"])
+
+    if should_stop_job(ctx.job_id):
+        return {"cancelled": True}
 
     update_job_status(
         ctx.job_id, "PROGRESS", progress={"percent": 100, "message": "Done"}
     )
-    results["total"] = sum(results.values())
+    results["total"] = sum(
+        v if isinstance(v, int) else v.get("total", 0) for v in results.values()
+    )
     return results
 
 
 # ─────────────────────────── Archival ───────────────────────────
 
 
-def _categorize_archival(catalog_id: str, collection_id: str) -> int:
+def _categorize_archival(catalog_id: str, archival_id: str) -> Dict[str, int]:
     with get_db_context() as db:
         rows = db.execute(
             text(
                 """
-                SELECT id FROM images
+                SELECT id, EXTRACT(YEAR FROM capture_time)::int AS yr
+                FROM images
                 WHERE catalog_id = CAST(:cid AS uuid)
                   AND capture_time IS NOT NULL
                   AND EXTRACT(YEAR FROM capture_time) < 2000
@@ -163,20 +246,61 @@ def _categorize_archival(catalog_id: str, collection_id: str) -> int:
             ),
             {"cid": catalog_id},
         ).fetchall()
-        image_ids = [r[0] for r in rows]
-        return _upsert_memberships(db, collection_id, image_ids, confidence=0.95)
+
+    buckets: Dict[str, List[str]] = {"pre_1980": [], "1980s": [], "1990s": []}
+    for img_id, yr in rows:
+        if yr < 1980:
+            buckets["pre_1980"].append(img_id)
+        elif yr < 1990:
+            buckets["1980s"].append(img_id)
+        else:
+            buckets["1990s"].append(img_id)
+
+    specs = [
+        ("pre_1980", "archival:pre_1980", "Pre-1980", "Film era and earlier."),
+        ("1980s", "archival:1980s", "1980s", ""),
+        ("1990s", "archival:1990s", "1990s", ""),
+    ]
+    totals: Dict[str, int] = {}
+    for bucket_key, sys_key, name, desc in specs:
+        ids = buckets[bucket_key]
+        if not ids:
+            continue
+        sub_id = _ensure_subcollection(catalog_id, archival_id, sys_key, name, desc)
+        totals[bucket_key] = _upsert_memberships(catalog_id, sub_id, ids, 0.95)
+
+    return {"total": sum(totals.values()), **totals}
 
 
 # ─────────────────────────── Travel ───────────────────────────
 
 
-def _categorize_travel(catalog_id: str, collection_id: str) -> int:
-    """
-    For each image with GPS, compute whether it's >TRAVEL_DISTANCE_KM from
-    the centroid of GPS images in the surrounding ±TRAVEL_WINDOW_DAYS window.
-    Images meeting this threshold AND in a day with >= TRAVEL_MIN_IMAGES_PER_DAY
-    qualifying images are flagged as travel.
-    """
+def _trip_name(start: date, end: date) -> str:
+    """Human-readable trip name from date range."""
+    months = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+    ]
+    if start.year == end.year:
+        if start.month == end.month:
+            return f"{months[start.month - 1]} {start.day}–{end.day}, {start.year}"
+        return f"{months[start.month - 1]}–{months[end.month - 1]} {start.year}"
+    return (
+        f"{months[start.month - 1]} {start.year} – {months[end.month - 1]} {end.year}"
+    )
+
+
+def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
     with get_db_context() as db:
         rows = db.execute(
             text(
@@ -184,8 +308,7 @@ def _categorize_travel(catalog_id: str, collection_id: str) -> int:
                 SELECT id, capture_time, latitude, longitude
                 FROM images
                 WHERE catalog_id = CAST(:cid AS uuid)
-                  AND latitude IS NOT NULL
-                  AND longitude IS NOT NULL
+                  AND latitude IS NOT NULL AND longitude IS NOT NULL
                   AND capture_time IS NOT NULL
                   AND status_id NOT IN ('rejected', 'archived')
                 ORDER BY capture_time
@@ -195,62 +318,87 @@ def _categorize_travel(catalog_id: str, collection_id: str) -> int:
         ).fetchall()
 
     if len(rows) < 10:
-        return 0
+        return {"total": 0}
 
-    # Build timeline: [{id, ts, lat, lon}]
     timeline = [
         {"id": r[0], "ts": r[1], "lat": float(r[2]), "lon": float(r[3])} for r in rows
     ]
 
+    # Step 1: flag travel images using GPS delta from surrounding window
     window_td = timedelta(days=TRAVEL_WINDOW_DAYS)
-    travel_ids: List[str] = []
+    travel_ids: set = set()
 
     for img in timeline:
         ts = img["ts"]
-        lo, hi = ts - window_td, ts + window_td
-
-        # Surrounding images (exclude same day to avoid anchoring)
         same_day = ts.date()
         surrounding = [
             (t["lat"], t["lon"])
             for t in timeline
-            if lo <= t["ts"] <= hi and t["ts"].date() != same_day
+            if ts - window_td <= t["ts"] <= ts + window_td
+            and t["ts"].date() != same_day
         ]
         if len(surrounding) < 5:
             continue
+        c = _centroid(surrounding)
+        if (
+            c
+            and _haversine_km(img["lat"], img["lon"], c[0], c[1]) >= TRAVEL_DISTANCE_KM
+        ):
+            travel_ids.add(img["id"])
 
-        centroid = _centroid(surrounding)
-        if centroid is None:
-            continue
-
-        dist = _haversine_km(img["lat"], img["lon"], centroid[0], centroid[1])
-        if dist >= TRAVEL_DISTANCE_KM:
-            travel_ids.append(img["id"])
-
-    # Require at least TRAVEL_MIN_IMAGES_PER_DAY travel-flagged images per day
-    # (filters out isolated outliers like a one-off GPS glitch)
-    from collections import Counter
-
-    day_counts: Counter = Counter()
-    travel_id_set = set(travel_ids)
-    for img in timeline:
-        if img["id"] in travel_id_set:
-            day_counts[img["ts"].date()] += 1
-
+    # Require TRAVEL_MIN_IMAGES_PER_DAY per day to filter GPS glitches
+    day_counts: Counter = Counter(
+        img["ts"].date() for img in timeline if img["id"] in travel_ids
+    )
     qualified_days = {
-        day for day, cnt in day_counts.items() if cnt >= TRAVEL_MIN_IMAGES_PER_DAY
+        d for d, n in day_counts.items() if n >= TRAVEL_MIN_IMAGES_PER_DAY
     }
-    day_map = {img["id"]: img["ts"].date() for img in timeline}
-    final_ids = [iid for iid in travel_ids if day_map.get(iid) in qualified_days]
+    travel_images = [
+        img
+        for img in timeline
+        if img["id"] in travel_ids and img["ts"].date() in qualified_days
+    ]
 
-    with get_db_context() as db:
-        return _upsert_memberships(db, collection_id, final_ids, confidence=0.80)
+    if not travel_images:
+        return {"total": 0}
+
+    # Step 2: group consecutive travel days into trips (gap <= TRIP_MAX_GAP_DAYS)
+    by_date: Dict[date, List[str]] = {}
+    for img in travel_images:
+        by_date.setdefault(img["ts"].date(), []).append(img["id"])
+
+    sorted_days = sorted(by_date.keys())
+    trips: List[List[date]] = []
+    current: List[date] = [sorted_days[0]]
+    for d in sorted_days[1:]:
+        if (d - current[-1]).days <= TRIP_MAX_GAP_DAYS:
+            current.append(d)
+        else:
+            trips.append(current)
+            current = [d]
+    trips.append(current)
+
+    # Step 3: create a sub-collection per trip
+    trip_count = 0
+    for trip_days in trips:
+        start_d, end_d = trip_days[0], trip_days[-1]
+        sys_key = f"travel_trip:{start_d.isoformat()}_{end_d.isoformat()}"
+        name = _trip_name(start_d, end_d)
+        sub_id = _ensure_subcollection(
+            catalog_id, travel_id, sys_key, name, f"Trip detected {start_d} – {end_d}"
+        )
+        ids = [i for d in trip_days for i in by_date.get(d, [])]
+        n = _upsert_memberships(catalog_id, sub_id, ids, 0.80)
+        trip_count += n
+        logger.info(f"Travel trip '{name}': {n} images")
+
+    return {"trips": len(trips), "total": trip_count}
 
 
 # ─────────────────────────── Work & Professional ───────────────────────────
 
 
-def _categorize_work(catalog_id: str, collection_id: str) -> int:
+def _categorize_work(catalog_id: str, work_id: str) -> Dict[str, int]:
     with get_db_context() as db:
         rows = db.execute(
             text(
@@ -264,29 +412,54 @@ def _categorize_work(catalog_id: str, collection_id: str) -> int:
             {"cid": catalog_id},
         ).fetchall()
 
-    work_ids: List[str] = []
-    for r in rows:
-        img_id, ts, content_class, camera_make = r[0], r[1], r[2], r[3]
-        is_doc = content_class in ("document", "screenshot")
-        is_work_hours = (
-            ts is not None
-            and ts.weekday() < 5  # Mon–Fri
-            and 8 <= ts.hour < 18  # 8am–6pm
-            and camera_make is not None  # has camera EXIF
-            and content_class not in NOISE_CLASSES
-            and content_class != "screenshot"  # screenshots handled via doc flag
-        )
-        if is_doc or is_work_hours:
-            work_ids.append(img_id)
+    docs: List[str] = []
+    screenshots: List[str] = []
+    work_general: List[str] = []
 
-    with get_db_context() as db:
-        return _upsert_memberships(db, collection_id, work_ids, confidence=0.70)
+    for r in rows:
+        img_id, ts, content_class, camera_make = r
+        if content_class == "document":
+            docs.append(img_id)
+        elif content_class == "screenshot":
+            screenshots.append(img_id)
+        elif (
+            ts is not None
+            and ts.weekday() < 5
+            and 8 <= ts.hour < 18
+            and camera_make is not None
+            and content_class not in NOISE_CLASSES
+        ):
+            work_general.append(img_id)
+
+    totals: Dict[str, int] = {}
+    specs = [
+        (docs, "work:documents", "Documents", "Scanned documents, PDFs, whiteboards."),
+        (
+            screenshots,
+            "work:screenshots",
+            "Screenshots",
+            "App screenshots and screen captures.",
+        ),
+        (
+            work_general,
+            "work:work_hours",
+            "Work Hours",
+            "Photos taken on weekdays during business hours.",
+        ),
+    ]
+    for ids, sys_key, name, desc in specs:
+        if not ids:
+            continue
+        sub_id = _ensure_subcollection(catalog_id, work_id, sys_key, name, desc)
+        totals[name] = _upsert_memberships(catalog_id, sub_id, ids, 0.70)
+
+    return {"total": sum(totals.values()), **totals}
 
 
 # ─────────────────────────── Family & Personal ───────────────────────────
 
 
-def _categorize_family_personal(catalog_id: str, collection_id: str) -> int:
+def _categorize_family(catalog_id: str, family_id: str) -> Dict[str, int]:
     with get_db_context() as db:
         rows = db.execute(
             text(
@@ -302,70 +475,31 @@ def _categorize_family_personal(catalog_id: str, collection_id: str) -> int:
             {"cid": catalog_id},
         ).fetchall()
 
-    personal_ids: List[str] = []
+    # Group by decade
+    by_decade: Dict[str, List[str]] = {}
     for r in rows:
-        img_id, ts, _, content_class = r[0], r[1], r[2], r[3]
+        img_id, ts, _, content_class = r
         if content_class in NOISE_CLASSES:
             continue
-        is_weekend = ts.weekday() >= 5  # Sat/Sun
-        is_evening = 19 <= ts.hour < 23  # 7pm–11pm
-        if is_weekend or is_evening:
-            personal_ids.append(img_id)
+        is_weekend = ts.weekday() >= 5
+        is_evening = 19 <= ts.hour < 23
+        if not (is_weekend or is_evening):
+            continue
+        decade = f"{(ts.year // 10) * 10}s"
+        by_decade.setdefault(decade, []).append(img_id)
 
-    with get_db_context() as db:
-        return _upsert_memberships(db, collection_id, personal_ids, confidence=0.65)
+    totals: Dict[str, int] = {}
+    for decade, ids in sorted(by_decade.items()):
+        if not ids:
+            continue
+        sys_key = f"family:{decade}"
+        sub_id = _ensure_subcollection(
+            catalog_id,
+            family_id,
+            sys_key,
+            decade,
+            f"Personal photos from the {decade}.",
+        )
+        totals[decade] = _upsert_memberships(catalog_id, sub_id, ids, 0.65)
 
-
-# ─────────────────────────── Shared helper ───────────────────────────
-
-
-def _upsert_memberships(
-    db: Any, collection_id: str, image_ids: List[str], confidence: float
-) -> int:
-    """Insert or update AI-suggested memberships (confirmed=False, source='system')."""
-    if not image_ids:
-        return 0
-
-    # Fetch already-existing memberships so we don't downgrade confirmed ones
-    existing = {
-        r[0]: r[1]
-        for r in db.execute(
-            text(
-                "SELECT image_id, confirmed FROM collection_images "
-                "WHERE collection_id = CAST(:cid AS uuid)"
-            ),
-            {"cid": collection_id},
-        ).fetchall()
-    }
-
-    to_insert: List[str] = []
-    for iid in image_ids:
-        if iid not in existing:
-            to_insert.append(iid)
-        # If already there (any confirmation state), leave it alone
-
-    if not to_insert:
-        return 0
-
-    db.execute(
-        text(
-            """
-            INSERT INTO collection_images
-                (id, collection_id, image_id, position, added_at,
-                 confidence, confirmed, source)
-            SELECT
-                gen_random_uuid(),
-                CAST(:cid AS uuid),
-                unnest(CAST(:ids AS text[])),
-                0,
-                NOW(),
-                :conf,
-                false,
-                'system'
-            ON CONFLICT (collection_id, image_id) DO NOTHING
-            """
-        ),
-        {"cid": collection_id, "ids": to_insert, "conf": confidence},
-    )
-    db.commit()
-    return len(to_insert)
+    return {"total": sum(totals.values()), **totals}

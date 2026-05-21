@@ -110,6 +110,14 @@ tagging-all = [
     "ftfy>=6.1.0",
     "ollama>=0.3.0",
 ]
+faces = [
+    # Face detection and recognition (requires GPU for best performance)
+    # Install with: pip install -e ".[faces]"
+    # Also requires: pip install onnxruntime-gpu (for GPU) or onnxruntime (for CPU)
+    "insightface>=0.7.3",
+    "scikit-learn>=1.3.0",
+    "opencv-python-headless>=4.8.0",
+]
 
 [project.scripts]
 lumina-analyze = "lumina.cli.analyze:analyze"
@@ -211,6 +219,18 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "ftfy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "insightface.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "sklearn.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "cv2.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

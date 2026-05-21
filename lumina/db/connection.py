@@ -87,6 +87,11 @@ SYSTEM_COLLECTIONS = [
         "description": "Historical photos from before 2000 — film era, scanned prints, early digital.",
     },
     {
+        "system_key": "people",
+        "name": "People",
+        "description": "Photos organised by person — sub-collections created by face detection.",
+    },
+    {
         "system_key": "projects",
         "name": "Projects",
         "description": "Manually curated project collections — add images yourself to track ongoing work.",
@@ -170,6 +175,18 @@ def init_db() -> None:
 
     upgrade_categories(engine)
     logger.info("Categories schema migration applied")
+
+    # Run collection hierarchy migration (idempotent)
+    from .migrations.collection_hierarchy import upgrade as upgrade_hierarchy
+
+    upgrade_hierarchy(engine)
+    logger.info("Collection hierarchy migration applied")
+
+    # Run face schema migration (idempotent)
+    from .migrations.face_schema import upgrade as upgrade_faces
+
+    upgrade_faces(engine)
+    logger.info("Face schema migration applied")
 
     # Populate reference tables
     db = SessionLocal()
