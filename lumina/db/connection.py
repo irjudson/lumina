@@ -65,6 +65,68 @@ def _populate_reference_tables(db: Session) -> None:
         )
 
 
+SYSTEM_COLLECTIONS = [
+    {
+        "system_key": "travel",
+        "name": "Travel",
+        "description": "Photos taken far from your usual locations — road trips, vacations, multi-day journeys.",
+    },
+    {
+        "system_key": "family_personal",
+        "name": "Family & Personal",
+        "description": "Personal moments captured in your own time — evenings, weekends, family events.",
+    },
+    {
+        "system_key": "work_professional",
+        "name": "Work & Professional",
+        "description": "Documents, whiteboards, work events, and professional content.",
+    },
+    {
+        "system_key": "archival",
+        "name": "Archival",
+        "description": "Historical photos from before 2000 — film era, scanned prints, early digital.",
+    },
+    {
+        "system_key": "projects",
+        "name": "Projects",
+        "description": "Manually curated project collections — add images yourself to track ongoing work.",
+    },
+]
+
+
+def _seed_system_collections(db: Session) -> None:
+    """Create system collections for every catalog (idempotent)."""
+    from .models import Catalog, Collection
+
+    catalogs = db.query(Catalog).all()
+    added = 0
+    for catalog in catalogs:
+        existing_keys = {
+            c.system_key
+            for c in db.query(Collection.system_key)
+            .filter(
+                Collection.catalog_id == catalog.id,
+                Collection.system_key.isnot(None),
+            )
+            .all()
+        }
+        for spec in SYSTEM_COLLECTIONS:
+            if spec["system_key"] not in existing_keys:
+                db.add(
+                    Collection(
+                        catalog_id=catalog.id,
+                        name=spec["name"],
+                        description=spec["description"],
+                        source="system",
+                        system_key=spec["system_key"],
+                    )
+                )
+                added += 1
+    if added:
+        db.commit()
+        logger.info(f"Seeded {added} system collection(s)")
+
+
 def init_db() -> None:
     """Initialize database by creating all tables and populating reference data."""
     logger.info("Initializing database...")
@@ -103,10 +165,17 @@ def init_db() -> None:
     upgrade_skipped_imports(engine)
     logger.info("Skipped imports migration applied")
 
+    # Run categories schema migration (idempotent)
+    from .migrations.categories_schema import upgrade as upgrade_categories
+
+    upgrade_categories(engine)
+    logger.info("Categories schema migration applied")
+
     # Populate reference tables
     db = SessionLocal()
     try:
         _populate_reference_tables(db)
+        _seed_system_collections(db)
     finally:
         db.close()
 

@@ -161,7 +161,39 @@
         </div>
       </nav>
 
-      <!-- Collections (collapsible) -->
+      <!-- Categories (system collections, collapsible) -->
+      <nav v-if="systemCollections.length > 0" class="border-t border-gray-800 mt-2">
+        <button
+          @click="categoriesOpen = !categoriesOpen"
+          class="w-full flex items-center justify-between px-6 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide hover:text-gray-400 transition-colors"
+        >
+          <span>Categories</span>
+          <ChevronDownIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-180': categoriesOpen }" />
+        </button>
+        <div v-if="categoriesOpen" class="px-3 pb-2 space-y-1">
+          <div
+            v-for="col in systemCollections"
+            :key="col.id"
+            class="flex items-center gap-1"
+          >
+            <NavItem
+              icon="Layers"
+              :label="col.name"
+              :count="col.imageCount"
+              :active="activeView === `collection:${col.id}`"
+              class="flex-1 min-w-0"
+              @click="$emit('navigate', `collection:${col.id}`)"
+            />
+            <span
+              v-if="col.pendingCount > 0"
+              class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+              :title="`${col.pendingCount} unreviewed suggestions`"
+            >{{ col.pendingCount }}</span>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Collections (user collections, collapsible) -->
       <nav class="border-t border-gray-800 mt-2">
         <button
           @click="collectionsOpen = !collectionsOpen"
@@ -179,14 +211,14 @@
             <span>New Collection</span>
           </button>
 
-          <!-- Collections List -->
-          <div v-if="collections && collections.length > 0" class="space-y-1 mt-1">
+          <!-- User Collections List -->
+          <div v-if="userCollections.length > 0" class="space-y-1 mt-1">
             <NavItem
-              v-for="collection in collections"
+              v-for="collection in userCollections"
               :key="collection.id"
               icon="Folder"
               :label="collection.name"
-              :count="collection.imageIds.length"
+              :count="collection.imageCount"
               :active="activeView === `collection:${collection.id}`"
               @click="$emit('navigate', `collection:${collection.id}`)"
             />
@@ -210,7 +242,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import {
   Images as ImagesIcon,
   Calendar as CalendarIcon,
@@ -229,10 +261,12 @@ import {
   PartyPopper as PartyPopperIcon,
   ChevronDown as ChevronDownIcon,
   BarChart2 as BarChart2Icon,
+  Layers as LayersIcon,
 } from 'lucide-vue-next'
 
 const smartViewsOpen = ref(true)
 const tagsOpen = ref(false)
+const categoriesOpen = ref(true)
 const collectionsOpen = ref(true)
 import NavItem from './NavItem.vue'
 import TagBrowser from './TagBrowser.vue'
@@ -266,7 +300,7 @@ interface Props {
   selectedTags?: string[]
 }
 
-withDefaults(defineProps<Props>(), {
+const props = withDefaults(defineProps<Props>(), {
   activeView: 'all',
   catalogName: 'My Photos',
   counts: () => ({
@@ -295,4 +329,11 @@ defineEmits<{
   'create-collection': []
   'filter-tags': [tags: string[]]
 }>()
+
+const systemCollections = computed(() =>
+  (props.collections ?? []).filter(c => c.source === 'system')
+)
+const userCollections = computed(() =>
+  (props.collections ?? []).filter(c => c.source !== 'system')
+)
 </script>

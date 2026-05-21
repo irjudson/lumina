@@ -155,6 +155,9 @@ export interface CollectionListItem {
   description?: string
   cover_image_id?: string
   image_count: number
+  pending_count: number
+  source: 'user' | 'system'
+  system_key?: string | null
   created_at: string
   updated_at: string
 }
@@ -165,6 +168,8 @@ export interface CollectionDetail {
   description?: string
   cover_image_id?: string
   image_ids: string[]
+  source: 'user' | 'system'
+  system_key?: string | null
   created_at: string
   updated_at: string
 }
@@ -461,6 +466,16 @@ class ApiClient {
 
   async removeImagesFromCollection(catalogId: string, collectionId: string, imageIds: string[]): Promise<{ removed: number }> {
     const response = await this.client.delete<{ removed: number }>(`/catalogs/${catalogId}/collections/${collectionId}/images`, { data: { image_ids: imageIds } })
+    return response.data
+  }
+
+  async confirmCollectionMemberships(catalogId: string, collectionId: string, imageIds: string[]): Promise<{ confirmed: number }> {
+    const response = await this.client.post<{ confirmed: number }>(`/catalogs/${catalogId}/collections/${collectionId}/confirm`, { image_ids: imageIds })
+    return response.data
+  }
+
+  async rejectCollectionMemberships(catalogId: string, collectionId: string, imageIds: string[]): Promise<{ rejected: number }> {
+    const response = await this.client.post<{ rejected: number }>(`/catalogs/${catalogId}/collections/${collectionId}/reject`, { image_ids: imageIds })
     return response.data
   }
 

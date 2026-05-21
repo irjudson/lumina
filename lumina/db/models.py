@@ -441,7 +441,7 @@ class WarehouseConfig(Base):
 
 
 class Collection(Base):
-    """User-created collections (albums) of images."""
+    """User-created collections (albums) and system-managed categories."""
 
     __tablename__ = "collections"
 
@@ -456,6 +456,10 @@ class Collection(Base):
     cover_image_id = Column(
         String, ForeignKey("images.id", ondelete="SET NULL"), nullable=True
     )
+    # 'user' = manually created; 'system' = auto-managed category
+    source = Column(String(16), nullable=False, default="user", server_default="user")
+    # Stable identifier for system categories (null for user collections)
+    system_key = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
@@ -488,6 +492,10 @@ class CollectionImage(Base):
     )
     position = Column(Integer, default=0)
     added_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # AI-suggested membership fields (source='system', confirmed=False until user approves)
+    confidence = Column(Float, nullable=False, default=1.0, server_default="1.0")
+    confirmed = Column(Boolean, nullable=False, default=True, server_default="true")
+    source = Column(String(16), nullable=False, default="user", server_default="user")
 
     # Relationships
     collection = relationship("Collection", back_populates="collection_images")
