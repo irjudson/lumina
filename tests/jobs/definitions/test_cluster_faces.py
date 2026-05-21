@@ -1,3 +1,5 @@
+import importlib
+
 import numpy as np
 import pytest
 
@@ -5,6 +7,10 @@ from lumina.jobs.definitions.cluster_faces import (
     _dbscan,
     _parse_embeddings,
     _representative_face,
+)
+
+requires_sklearn = pytest.mark.skipif(
+    importlib.util.find_spec("sklearn") is None, reason="sklearn not installed"
 )
 
 # ─────────────────────────── _parse_embeddings ───────────────────────────
@@ -88,6 +94,7 @@ def test_representative_face_noncontiguous_indices():
 # ─────────────────────────── _dbscan ───────────────────────────
 
 
+@requires_sklearn
 def test_dbscan_nearly_identical_same_cluster():
     a = np.array([1.0, 0.0, 0.0], dtype=np.float32)
     b = a + np.float32(1e-4)
@@ -97,6 +104,7 @@ def test_dbscan_nearly_identical_same_cluster():
     assert labels[0] != -1
 
 
+@requires_sklearn
 def test_dbscan_orthogonal_embeddings_not_same_cluster():
     embeddings = np.array(
         [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -108,6 +116,7 @@ def test_dbscan_orthogonal_embeddings_not_same_cluster():
     assert labels[1] == -1
 
 
+@requires_sklearn
 def test_dbscan_all_same_single_cluster():
     v = np.array([0.6, 0.8, 0.0], dtype=np.float32)
     embeddings = np.tile(v, (5, 1))
@@ -115,6 +124,7 @@ def test_dbscan_all_same_single_cluster():
     assert set(labels) == {0}
 
 
+@requires_sklearn
 def test_dbscan_noise_label():
     # Three very different unit vectors; with min_samples=3 none form a cluster
     embeddings = np.array(
