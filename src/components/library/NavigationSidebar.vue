@@ -46,6 +46,95 @@
         />
       </nav>
 
+      <!-- Collections (system + user, collapsible 2-level tree) -->
+      <nav class="border-t border-gray-800 mt-2">
+        <button
+          @click="collectionsOpen = !collectionsOpen"
+          class="w-full flex items-center justify-between px-6 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide hover:text-gray-400 transition-colors"
+        >
+          <span>Collections</span>
+          <ChevronDownIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-180': collectionsOpen }" />
+        </button>
+        <div v-if="collectionsOpen" class="px-3 pb-2 space-y-0.5">
+          <!-- System collections (2-level tree) -->
+          <template v-for="col in systemCollections" :key="col.id">
+            <div class="flex items-center gap-1">
+              <button
+                v-if="col.childCount > 0"
+                @click.stop="toggleExpanded(col.id)"
+                class="shrink-0 p-1 text-gray-600 hover:text-gray-400 transition-colors"
+                :title="expandedCategories.has(col.id) ? 'Collapse' : 'Expand'"
+              >
+                <ChevronRightIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-90': expandedCategories.has(col.id) }" />
+              </button>
+              <span v-else class="w-5 shrink-0" />
+              <NavItem
+                icon="Layers"
+                :label="col.name"
+                :count="col.imageCount || undefined"
+                :active="activeView === `collection:${col.id}`"
+                class="flex-1 min-w-0"
+                @click="$emit('navigate', `collection:${col.id}`)"
+              />
+              <span
+                v-if="col.pendingCount > 0"
+                class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+                :title="`${col.pendingCount} unreviewed suggestions`"
+              >{{ col.pendingCount }}</span>
+            </div>
+            <div v-if="expandedCategories.has(col.id)" class="pl-5 space-y-0.5">
+              <template v-for="child in childrenOf(col.id)" :key="child.id">
+                <div class="flex items-center gap-1">
+                  <NavItem
+                    icon="Folder"
+                    :label="child.name"
+                    :count="child.imageCount || undefined"
+                    :active="activeView === `collection:${child.id}`"
+                    class="flex-1 min-w-0"
+                    @click="$emit('navigate', `collection:${child.id}`)"
+                  />
+                  <span
+                    v-if="child.pendingCount > 0"
+                    class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+                    :title="`${child.pendingCount} unreviewed`"
+                  >{{ child.pendingCount }}</span>
+                </div>
+              </template>
+              <p
+                v-if="childrenOf(col.id).length === 0 && col.childCount > 0"
+                class="text-xs text-gray-600 px-3 py-1"
+              >Loading…</p>
+            </div>
+          </template>
+
+          <!-- Divider between system and user collections -->
+          <div v-if="systemCollections.length > 0" class="border-t border-gray-800 my-1" />
+
+          <!-- New Collection button -->
+          <button
+            @click="$emit('create-collection')"
+            class="w-full px-3 py-2 text-left text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors flex items-center gap-2"
+          >
+            <PlusIcon class="w-4 h-4" />
+            <span>New Collection</span>
+          </button>
+
+          <!-- User collections -->
+          <div v-if="userCollections.length > 0" class="space-y-1 mt-1">
+            <NavItem
+              v-for="collection in userCollections"
+              :key="collection.id"
+              icon="Folder"
+              :label="collection.name"
+              :count="collection.imageCount"
+              :active="activeView === `collection:${collection.id}`"
+              @click="$emit('navigate', `collection:${collection.id}`)"
+            />
+          </div>
+          <p v-else class="text-xs text-gray-600 px-3 py-1">No collections yet</p>
+        </div>
+      </nav>
+
       <!-- Smart Views (collapsible) -->
       <nav class="border-t border-gray-800 mt-2">
         <button
@@ -160,109 +249,6 @@
           />
         </div>
       </nav>
-
-      <!-- Categories (system collections, collapsible 2-level tree) -->
-      <nav v-if="systemCollections.length > 0" class="border-t border-gray-800 mt-2">
-        <button
-          @click="categoriesOpen = !categoriesOpen"
-          class="w-full flex items-center justify-between px-6 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide hover:text-gray-400 transition-colors"
-        >
-          <span>Categories</span>
-          <ChevronDownIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-180': categoriesOpen }" />
-        </button>
-        <div v-if="categoriesOpen" class="px-3 pb-2 space-y-0.5">
-          <template v-for="col in systemCollections" :key="col.id">
-            <!-- Category row -->
-            <div class="flex items-center gap-1">
-              <!-- expand/collapse toggle when it has children -->
-              <button
-                v-if="col.childCount > 0"
-                @click.stop="toggleExpanded(col.id)"
-                class="shrink-0 p-1 text-gray-600 hover:text-gray-400 transition-colors"
-                :title="expandedCategories.has(col.id) ? 'Collapse' : 'Expand'"
-              >
-                <ChevronRightIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-90': expandedCategories.has(col.id) }" />
-              </button>
-              <span v-else class="w-5 shrink-0" />
-              <NavItem
-                icon="Layers"
-                :label="col.name"
-                :count="col.imageCount || undefined"
-                :active="activeView === `collection:${col.id}`"
-                class="flex-1 min-w-0"
-                @click="$emit('navigate', `collection:${col.id}`)"
-              />
-              <span
-                v-if="col.pendingCount > 0"
-                class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
-                :title="`${col.pendingCount} unreviewed suggestions`"
-              >{{ col.pendingCount }}</span>
-            </div>
-            <!-- Children (shown when expanded) -->
-            <div
-              v-if="expandedCategories.has(col.id)"
-              class="pl-5 space-y-0.5"
-            >
-              <template v-for="child in childrenOf(col.id)" :key="child.id">
-                <div class="flex items-center gap-1">
-                  <NavItem
-                    icon="Folder"
-                    :label="child.name"
-                    :count="child.imageCount || undefined"
-                    :active="activeView === `collection:${child.id}`"
-                    class="flex-1 min-w-0"
-                    @click="$emit('navigate', `collection:${child.id}`)"
-                  />
-                  <span
-                    v-if="child.pendingCount > 0"
-                    class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
-                    :title="`${child.pendingCount} unreviewed`"
-                  >{{ child.pendingCount }}</span>
-                </div>
-              </template>
-              <!-- Loading indicator if children not yet loaded -->
-              <p
-                v-if="childrenOf(col.id).length === 0 && col.childCount > 0"
-                class="text-xs text-gray-600 px-3 py-1"
-              >Loading…</p>
-            </div>
-          </template>
-        </div>
-      </nav>
-
-      <!-- Collections (user collections, collapsible) -->
-      <nav class="border-t border-gray-800 mt-2">
-        <button
-          @click="collectionsOpen = !collectionsOpen"
-          class="w-full flex items-center justify-between px-6 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide hover:text-gray-400 transition-colors"
-        >
-          <span>Collections</span>
-          <ChevronDownIcon class="w-3 h-3 transition-transform" :class="{ 'rotate-180': collectionsOpen }" />
-        </button>
-        <div v-if="collectionsOpen" class="px-3 pb-2 space-y-1">
-          <button
-            @click="$emit('create-collection')"
-            class="w-full px-3 py-2 text-left text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 rounded transition-colors flex items-center gap-2"
-          >
-            <PlusIcon class="w-4 h-4" />
-            <span>New Collection</span>
-          </button>
-
-          <!-- User Collections List -->
-          <div v-if="userCollections.length > 0" class="space-y-1 mt-1">
-            <NavItem
-              v-for="collection in userCollections"
-              :key="collection.id"
-              icon="Folder"
-              :label="collection.name"
-              :count="collection.imageCount"
-              :active="activeView === `collection:${collection.id}`"
-              @click="$emit('navigate', `collection:${collection.id}`)"
-            />
-          </div>
-          <p v-else class="text-xs text-gray-600 px-3 py-1">No collections yet</p>
-        </div>
-      </nav>
     </div>
 
     <!-- Settings at Bottom -->
@@ -302,10 +288,9 @@ import {
   Layers as LayersIcon,
 } from 'lucide-vue-next'
 
-const smartViewsOpen = ref(true)
+const smartViewsOpen = ref(false)
 const tagsOpen = ref(false)
-const categoriesOpen = ref(true)
-const collectionsOpen = ref(true)
+const collectionsOpen = ref(false)
 import NavItem from './NavItem.vue'
 import TagBrowser from './TagBrowser.vue'
 import type { Collection } from '@/stores/collections'

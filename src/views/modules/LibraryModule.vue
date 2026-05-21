@@ -409,6 +409,26 @@
                     <PartyPopperIcon class="w-4 h-4" />
                     <span>Detect Events</span>
                   </button>
+
+                  <button
+                    v-if="libraryStore.filteredImages.length > 0"
+                    @click="triggerCategorize"
+                    :disabled="isCategorizeRunning"
+                    class="w-full px-3 py-2 text-left text-sm bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-400 rounded transition-colors flex items-center gap-2"
+                  >
+                    <LayersIcon class="w-4 h-4" />
+                    <span>{{ isCategorizeRunning ? 'Categorizing...' : 'Categorize Library' }}</span>
+                  </button>
+
+                  <button
+                    v-if="libraryStore.filteredImages.length > 0"
+                    @click="triggerDetectPeople"
+                    :disabled="isDetectPeopleRunning"
+                    class="w-full px-3 py-2 text-left text-sm bg-gray-800 hover:bg-gray-700 disabled:opacity-50 text-gray-400 rounded transition-colors flex items-center gap-2"
+                  >
+                    <UsersIcon class="w-4 h-4" />
+                    <span>{{ isDetectPeopleRunning ? 'Detecting People...' : 'Detect People' }}</span>
+                  </button>
                 </div>
               </div>
             </section>
@@ -640,7 +660,7 @@ import SkippedImportsView from '@/components/views/SkippedImportsView.vue'
 import ImageDetailOverlay from '@/components/views/ImageDetailOverlay.vue'
 import NavigationSidebar from '@/components/library/NavigationSidebar.vue'
 import FilterBar from '@/components/library/FilterBar.vue'
-import { ImageIcon, SettingsIcon, LoaderIcon, AlertCircleIcon, Star as StarIcon, Folder as FolderIcon, Sparkles as SparklesIcon, Copy as CopyIcon, Zap as ZapIcon, ImagePlus as ImagePlusIcon, RefreshCw as RefreshCwIcon, ChevronDown as ChevronDownIcon, FileWarning as FileWarningIcon, RotateCcw as RotateCcwIcon, PartyPopper as PartyPopperIcon } from 'lucide-vue-next'
+import { ImageIcon, SettingsIcon, LoaderIcon, AlertCircleIcon, Star as StarIcon, Folder as FolderIcon, Sparkles as SparklesIcon, Copy as CopyIcon, Zap as ZapIcon, ImagePlus as ImagePlusIcon, RefreshCw as RefreshCwIcon, ChevronDown as ChevronDownIcon, FileWarning as FileWarningIcon, RotateCcw as RotateCcwIcon, PartyPopper as PartyPopperIcon, Layers as LayersIcon, Users as UsersIcon } from 'lucide-vue-next'
 import type { Image, FileType, ImageStatus } from '@/stores/library'
 import CatalogSettings from '@/views/CatalogSettings.vue'
 import CreateCollectionModal from '@/components/collections/CreateCollectionModal.vue'
@@ -878,6 +898,27 @@ watch(() => jobStore.activeJobs, async (jobs, oldJobs) => {
   if (justCompleted('auto_tag')) {
     await fetchAvailableTags()
     await fetchSmartViewStats()
+  }
+
+  // Face detection completed — auto-chain cluster_faces
+  if (justCompleted('detect_faces') && catalogStore.activeCatalog) {
+    try {
+      const job = await api.createJob({
+        catalog_id: catalogStore.activeCatalog.id,
+        job_type: 'cluster_faces',
+        params: {},
+        job_source: 'user',
+        priority: 75,
+      })
+      jobStore.addJob(job)
+    } catch (error) {
+      console.error('Failed to auto-chain cluster_faces:', error)
+    }
+  }
+
+  // Categorize or cluster completed — refresh collections
+  if (justCompleted('categorize_images') || justCompleted('cluster_faces')) {
+    await collectionsStore.initForCatalog(catalogStore.activeCatalog.id)
   }
 })
 
@@ -1292,6 +1333,14 @@ const isScanRunning = computed(() =>
   jobStore.activeJobs.some(j => j.job_type === 'scan' && (j.status === 'running' || j.status === 'pending'))
 )
 
+const isCategorizeRunning = computed(() =>
+  jobStore.activeJobs.some(j => j.job_type === 'categorize_images' && (j.status === 'running' || j.status === 'pending'))
+)
+
+const isDetectPeopleRunning = computed(() =>
+  jobStore.activeJobs.some(j => (j.job_type === 'detect_faces' || j.job_type === 'cluster_faces') && (j.status === 'running' || j.status === 'pending'))
+)
+
 function formatJobTypeShort(type: string): string {
   const types: Record<string, string> = {
     scan: 'Scanning',
@@ -1300,8 +1349,43 @@ function formatJobTypeShort(type: string): string {
     auto_tag: 'AI Tagging',
     generate_thumbnails: 'Thumbnails',
     classify_images: 'Image Classification',
+    categorize_images: 'Categorizing',
+    detect_faces: 'Detecting Faces',
+    cluster_faces: 'Clustering People',
   }
   return types[type] || type || 'Job'
+}
+
+async function triggerCategorize() {
+  if (!catalogStore.activeCatalog) return
+  try {
+    const job = await api.createJob({
+      catalog_id: catalogStore.activeCatalog.id,
+      job_type: 'categorize_images',
+      params: {},
+      job_source: 'user',
+      priority: 80,
+    })
+    jobStore.addJob(job)
+  } catch (error) {
+    console.error('Failed to trigger categorize:', error)
+  }
+}
+
+async function triggerDetectPeople() {
+  if (!catalogStore.activeCatalog) return
+  try {
+    const job = await api.createJob({
+      catalog_id: catalogStore.activeCatalog.id,
+      job_type: 'detect_faces',
+      params: {},
+      job_source: 'user',
+      priority: 75,
+    })
+    jobStore.addJob(job)
+  } catch (error) {
+    console.error('Failed to trigger face detection:', error)
+  }
 }
 
 async function triggerScan() {
