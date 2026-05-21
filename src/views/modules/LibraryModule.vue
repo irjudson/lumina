@@ -1002,9 +1002,7 @@ async function handleNavigate(view: string) {
       if (view.startsWith('collection:')) {
         const collectionId = view.substring('collection:'.length)
         collectionsStore.activeCollectionId = collectionId
-        if (catalogStore.activeCatalog) {
-          libraryStore.setFilter({ collectionId })
-        }
+        libraryStore.setFilter({ collectionId })
       } else {
         console.log('Unknown view:', view)
       }
