@@ -86,7 +86,16 @@ def _ensure_subcollection(
             {"cid": catalog_id, "key": system_key},
         ).fetchone()
         if row:
-            return str(row[0])
+            collection_id = str(row[0])
+            db.execute(
+                text(
+                    "UPDATE collections SET name = :name, updated_at = NOW() "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"name": name, "id": collection_id},
+            )
+            db.commit()
+            return collection_id
         new_id = str(uuid.uuid4())
         db.execute(
             text(
