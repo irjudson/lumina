@@ -25,11 +25,17 @@ MIN_DETECTION_SCORE = 0.6  # discard low-confidence detections
 
 
 def _load_app():
-    """Lazily load InsightFace FaceAnalysis, downloading model if needed."""
-    try:
-        from insightface.app import FaceAnalysis
+    """Lazily load InsightFace FaceAnalysis, downloading model if needed.
 
-        os.makedirs(MODEL_DIR, exist_ok=True)
+    Tries CUDA first; falls back to CPU if CUDA initialisation fails
+    (e.g. cuBLAS resource allocation error when VRAM is exhausted).
+    """
+    from insightface.app import FaceAnalysis
+
+    os.makedirs(MODEL_DIR, exist_ok=True)
+
+    # Attempt GPU first
+    try:
         app = FaceAnalysis(
             name="buffalo_l",
             root=MODEL_DIR,
@@ -38,8 +44,21 @@ def _load_app():
         app.prepare(ctx_id=0, det_size=(640, 640))
         logger.info("InsightFace buffalo_l loaded on GPU")
         return app
-    except Exception as e:
-        logger.error(f"Failed to load InsightFace: {e}")
+    except Exception as gpu_err:
+        logger.warning(f"GPU initialisation failed ({gpu_err}); falling back to CPU")
+
+    # CPU fallback — ctx_id=-1 tells InsightFace to skip GPU context
+    try:
+        app = FaceAnalysis(
+            name="buffalo_l",
+            root=MODEL_DIR,
+            providers=["CPUExecutionProvider"],
+        )
+        app.prepare(ctx_id=-1, det_size=(640, 640))
+        logger.info("InsightFace buffalo_l loaded on CPU (GPU unavailable)")
+        return app
+    except Exception as cpu_err:
+        logger.error(f"Failed to load InsightFace on CPU: {cpu_err}")
         raise
 
 
