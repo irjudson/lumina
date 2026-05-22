@@ -86,7 +86,7 @@ def check_process_new(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict]:
 
     try:
         with get_db_context() as db:
-            # Check for images without thumbnails
+            # Check for images without thumbnails, excluding known-unreadable files
             result = db.execute(
                 text(
                     """
@@ -94,6 +94,7 @@ def check_process_new(catalog_id: str, config: Dict) -> Tuple[bool, int, Dict]:
                     FROM images
                     WHERE catalog_id = :catalog_id
                     AND thumbnail_path IS NULL
+                    AND COALESCE(processing_flags->>'thumbnail_failed', 'false') != 'true'
                 """
                 ),
                 {"catalog_id": catalog_id},
@@ -134,6 +135,7 @@ def check_generate_thumbnails(catalog_id: str, config: Dict) -> Tuple[bool, int,
                     FROM images
                     WHERE catalog_id = :catalog_id
                     AND thumbnail_path IS NULL
+                    AND COALESCE(processing_flags->>'thumbnail_failed', 'false') != 'true'
                 """
                 ),
                 {"catalog_id": catalog_id},

@@ -268,9 +268,14 @@ def generate_thumbnails_job(ctx: JobContext) -> Dict[str, Any]:
                         image.thumbnail_path = rel_path
                         flags = dict(image.processing_flags or {})
                         flags["thumbnail_generated"] = True
+                        flags.pop("thumbnail_failed", None)
                         image.processing_flags = flags
                         thumbnails_generated += 1
                     else:
+                        # Mark so the warehouse won't endlessly retry unreadable files
+                        flags = dict(image.processing_flags or {})
+                        flags["thumbnail_failed"] = True
+                        image.processing_flags = flags
                         thumbnails_failed += 1
 
                 # Commit in batches

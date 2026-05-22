@@ -193,7 +193,7 @@ def generate_thumbnail(
             try:
                 img = Image.open(source_path)
             except Exception as e:
-                logger.error(f"Failed to open image {source_path}: {e}")
+                logger.warning(f"Failed to open image {source_path}: {e}")
                 return False
 
         # Apply EXIF orientation before any processing
