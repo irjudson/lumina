@@ -11,6 +11,8 @@ from .definitions import hash_v2  # noqa: F401  - registers hash_images_v2 job
 from .definitions import (  # noqa: F401  - registers detect_duplicates_v2 job
     detect_duplicates_v2,
 )
+from .definitions.archive_source import archive_source_job
+from .definitions.backup_catalog import backup_catalog_job
 from .types import JobContext
 
 logger = logging.getLogger(__name__)
@@ -2233,4 +2235,6 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "categorize_images": categorize_images_job,
     "detect_faces": detect_faces_job,
     "cluster_faces": cluster_faces_job,
+    "archive_source": archive_source_job,
+    "backup_catalog": backup_catalog_job,
 }

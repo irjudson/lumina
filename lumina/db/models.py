@@ -94,6 +94,7 @@ class Catalog(Base):
     schema_name = Column(String(255), nullable=False, unique=True)
     source_directories = Column(ARRAY(Text), nullable=False)
     organized_directory = Column(Text, nullable=True)
+    backup_destinations = Column(JSONB, nullable=True, default=list)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False

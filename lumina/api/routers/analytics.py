@@ -112,6 +112,24 @@ class VerifyResponse(BaseModel):
     ok: bool
 
 
+class ConfidenceTierItem(BaseModel):
+    count: int
+    pct: float
+
+
+class OrganizationResponse(BaseModel):
+    total: int
+    organized: int
+    not_organized: int
+    organized_pct: float
+    source_archived: int
+    source_archived_pct: float
+    by_confidence: Dict[str, ConfidenceTierItem]
+    total_bytes: int
+    organized_bytes: int
+    not_organized_bytes: int
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -697,6 +715,78 @@ def analytics_quality_sample(
 # ---------------------------------------------------------------------------
 # POST /quality/verify
 # ---------------------------------------------------------------------------
+
+
+@router.get("/{catalog_id}/analytics/organization", response_model=OrganizationResponse)
+def analytics_organization(
+    catalog_id: str, db: Session = Depends(get_db)
+) -> OrganizationResponse:
+    """Return organization and safety statistics for the catalog."""
+    _assert_catalog(catalog_id, db)
+
+    row = db.execute(
+        text(
+            """
+            SELECT
+                COUNT(*)                                                          AS total,
+                COUNT(*) FILTER (WHERE organized_path IS NOT NULL)                AS organized,
+                COUNT(*) FILTER (WHERE organized_path IS NULL)                    AS not_organized,
+                COUNT(*) FILTER (
+                    WHERE (processing_flags->>'source_archived')::boolean IS TRUE
+                )                                                                 AS source_archived,
+                COUNT(*) FILTER (
+                    WHERE organized_path IS NOT NULL
+                      AND processing_flags->>'organization_confidence' = 'resolved'
+                )                                                                 AS conf_resolved,
+                COUNT(*) FILTER (
+                    WHERE organized_path IS NOT NULL
+                      AND processing_flags->>'organization_confidence' = 'iffy'
+                )                                                                 AS conf_iffy,
+                COUNT(*) FILTER (
+                    WHERE organized_path IS NOT NULL
+                      AND processing_flags->>'organization_confidence' = 'date_only'
+                )                                                                 AS conf_date_only,
+                COUNT(*) FILTER (
+                    WHERE organized_path IS NOT NULL
+                      AND processing_flags->>'organization_confidence' = 'unresolved'
+                )                                                                 AS conf_unresolved,
+                COALESCE(SUM(size_bytes), 0)                                      AS total_bytes,
+                COALESCE(SUM(size_bytes) FILTER (WHERE organized_path IS NOT NULL), 0)
+                                                                                  AS organized_bytes,
+                COALESCE(SUM(size_bytes) FILTER (WHERE organized_path IS NULL), 0)
+                                                                                  AS not_organized_bytes
+            FROM images
+            WHERE catalog_id = CAST(:cid AS uuid)
+              AND status_id NOT IN ('rejected', 'archived')
+            """
+        ),
+        {"cid": catalog_id},
+    ).fetchone()
+
+    total = int(row.total or 0)
+    organized = int(row.organized or 0)
+    not_organized = int(row.not_organized or 0)
+    source_archived = int(row.source_archived or 0)
+
+    by_confidence: Dict[str, ConfidenceTierItem] = {}
+    for tier in ("resolved", "iffy", "date_only", "unresolved"):
+        count = int(getattr(row, f"conf_{tier}") or 0)
+        by_confidence[tier] = ConfidenceTierItem(
+            count=count, pct=_pct(count, organized)
+        )
+
+    return OrganizationResponse(
+        total=total,
+        organized=organized,
+        not_organized=not_organized,
+        organized_pct=_pct(organized, total),
+        source_archived=source_archived,
+        source_archived_pct=_pct(source_archived, organized) if organized else 0.0,
+        by_confidence=by_confidence,
+        total_bytes=int(row.total_bytes or 0),
+        organized_bytes=int(row.organized_bytes or 0),
+        not_organized_bytes=int(row.not_organized_bytes or 0),
+    )
 
 
 @router.post("/{catalog_id}/analytics/quality/verify", response_model=VerifyResponse)

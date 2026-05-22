@@ -188,6 +188,12 @@ def init_db() -> None:
     upgrade_faces(engine)
     logger.info("Face schema migration applied")
 
+    # Add backup_destinations to catalogs (idempotent)
+    from .migrations.backup_destinations import upgrade as upgrade_backup_dest
+
+    upgrade_backup_dest(engine)
+    logger.info("backup_destinations migration applied")
+
     # Populate reference tables
     db = SessionLocal()
     try:
