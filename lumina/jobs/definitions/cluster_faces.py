@@ -15,6 +15,7 @@ images are added (upsert via ON CONFLICT DO NOTHING).
 
 import logging
 import uuid
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -41,14 +42,14 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
         progress={"percent": 0, "message": "Loading face embeddings"},
     )
 
-    # --- Load embeddings ---
+    # --- Load embeddings and existing person assignments ---
     with get_db_context() as db:
         from sqlalchemy import text
 
         rows = db.execute(
             text(
                 """
-                SELECT f.id, f.image_id, f.embedding
+                SELECT f.id, f.image_id, f.embedding, f.person_collection_id
                 FROM faces f
                 WHERE f.catalog_id = CAST(:cid AS uuid)
                   AND f.embedding IS NOT NULL
@@ -67,6 +68,10 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
     face_ids = [str(r[0]) for r in rows]
     image_ids = [r[1] for r in rows]
     embeddings_raw = [r[2] for r in rows]
+    # Existing assignments from prior run + user merges (training signal)
+    prior_assignments: Dict[str, str] = {
+        str(r[0]): str(r[3]) for r in rows if r[3] is not None
+    }
 
     update_job_status(
         ctx.job_id,
@@ -106,6 +111,13 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
     # --- Get existing person sub-collections (for stable re-numbering) ---
     existing_person_count = _count_person_subcollections(catalog_id, people_col_id)
 
+    # --- Apply user-merge constraints: if faces in a cluster already point to a
+    #     user-confirmed collection (from a prior merge), re-use that collection.
+    #     This makes user corrections persist across re-clustering runs. ---
+    cluster_override: Dict[int, str] = _merge_constraint_map(
+        labels, face_ids, prior_assignments
+    )
+
     # --- Create/update per-person sub-collections ---
     people_created = 0
     images_categorized = 0
@@ -132,16 +144,19 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
         if len(cluster_image_ids) < MIN_IMAGES_PER_PERSON:
             continue
 
-        # Stable system_key: based on cluster centroid representative face id
-        rep_face_idx = _representative_face(embeddings, labels, cluster_label)
-        rep_face_id = face_ids[rep_face_idx]
-        sys_key = f"people_person:{rep_face_id}"
+        # Check if user has previously merged this cluster into an existing person
+        if cluster_label in cluster_override:
+            person_col_id = cluster_override[cluster_label]
+        else:
+            # Stable system_key: based on cluster centroid representative face id
+            rep_face_idx = _representative_face(embeddings, labels, cluster_label)
+            rep_face_id = face_ids[rep_face_idx]
+            sys_key = f"people_person:{rep_face_id}"
 
-        # Create or retrieve the person sub-collection
-        person_num = existing_person_count + people_created + 1
-        person_col_id = _ensure_person_collection(
-            catalog_id, people_col_id, sys_key, f"Person {person_num}"
-        )
+            person_num = existing_person_count + people_created + 1
+            person_col_id = _ensure_person_collection(
+                catalog_id, people_col_id, sys_key, f"Person {person_num}"
+            )
 
         # Update face rows to point at this collection
         _assign_faces_to_person(
@@ -169,6 +184,34 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
 
 
 # ─────────────────────────── Helpers ───────────────────────────
+
+
+def _merge_constraint_map(
+    labels: np.ndarray,
+    face_ids: List[str],
+    prior_assignments: Dict[str, str],
+    min_vote_fraction: float = 0.5,
+) -> Dict[int, str]:
+    """Return {cluster_label: person_collection_id} for clusters where a majority
+    of faces already point to an existing (user-confirmed) collection.
+
+    This lets user-corrected merges survive DBSCAN re-runs: after merging cluster
+    A into cluster B, all A faces have person_collection_id=B. If DBSCAN splits
+    them again, this function reunites them into B.
+    """
+    overrides: Dict[int, str] = {}
+    unique = sorted(set(labels) - {-1})
+    for lbl in unique:
+        cluster_face_ids = [face_ids[i] for i, l in enumerate(labels) if l == lbl]
+        votes = [
+            prior_assignments[f] for f in cluster_face_ids if f in prior_assignments
+        ]
+        if not votes:
+            continue
+        top_col, top_count = Counter(votes).most_common(1)[0]
+        if top_count / len(cluster_face_ids) >= min_vote_fraction:
+            overrides[lbl] = top_col
+    return overrides
 
 
 def _parse_embeddings(raw: List[Any]) -> np.ndarray:

@@ -336,6 +336,97 @@ def delete_collection(
     return {"status": "deleted"}
 
 
+class MergeCollectionRequest(BaseModel):
+    source_id: str  # collection to absorb into this one (then deleted)
+
+
+@router.post("/{catalog_id}/collections/{collection_id}/merge")
+def merge_collections(
+    catalog_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    request: MergeCollectionRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Merge source collection into target (collection_id).
+
+    Moves all images and re-points face embeddings so cluster_faces can use
+    the corrected assignments as a training signal on the next run.
+    """
+    from sqlalchemy import text
+
+    target = _get_collection_or_404(db, catalog_id, collection_id)
+    try:
+        source_uuid = uuid.UUID(request.source_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid source_id UUID")
+
+    source = _get_collection_or_404(db, catalog_id, source_uuid)
+
+    if source.id == target.id:
+        raise HTTPException(
+            status_code=400, detail="Cannot merge a collection into itself"
+        )
+
+    # 1. Move collection_images: insert missing rows, delete source rows
+    db.execute(
+        text(
+            """
+            INSERT INTO collection_images
+                (id, collection_id, image_id, position, added_at, confidence, confirmed, source)
+            SELECT gen_random_uuid(), CAST(:target AS uuid), image_id,
+                   position, added_at, confidence, confirmed, source
+            FROM collection_images
+            WHERE collection_id = CAST(:src AS uuid)
+            ON CONFLICT (collection_id, image_id) DO NOTHING
+            """
+        ),
+        {"target": str(target.id), "src": str(source.id)},
+    )
+    db.execute(
+        text("DELETE FROM collection_images WHERE collection_id = CAST(:src AS uuid)"),
+        {"src": str(source.id)},
+    )
+
+    # 2. Re-point face embeddings — this is the training signal for re-clustering
+    db.execute(
+        text(
+            """
+            UPDATE faces SET person_collection_id = CAST(:target AS uuid)
+            WHERE person_collection_id = CAST(:src AS uuid)
+              AND catalog_id = CAST(:cid AS uuid)
+            """
+        ),
+        {"target": str(target.id), "src": str(source.id), "cid": str(catalog_id)},
+    )
+
+    # 3. Re-parent any sub-collections of source to target
+    db.execute(
+        text(
+            "UPDATE collections SET parent_id = CAST(:target AS uuid) "
+            "WHERE parent_id = CAST(:src AS uuid) AND catalog_id = CAST(:cid AS uuid)"
+        ),
+        {"target": str(target.id), "src": str(source.id), "cid": str(catalog_id)},
+    )
+
+    # 4. Delete source
+    db.delete(source)
+    db.commit()
+
+    image_count = (
+        db.query(func.count(CollectionImage.id))
+        .filter(CollectionImage.collection_id == collection_id)
+        .scalar()
+        or 0
+    )
+
+    return {
+        "status": "merged",
+        "target_id": str(target.id),
+        "target_name": target.name,
+        "image_count": image_count,
+    }
+
+
 @router.post("/{catalog_id}/collections/{collection_id}/images")
 def add_images_to_collection(
     catalog_id: uuid.UUID,
