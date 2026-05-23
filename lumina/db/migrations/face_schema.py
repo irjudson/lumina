@@ -38,6 +38,19 @@ _STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_faces_catalog_id ON faces(catalog_id)",
     "CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id)",
     "CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_collection_id) WHERE person_collection_id IS NOT NULL",
+    # Add dismissed column (idempotent)
+    """
+    DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'faces' AND column_name = 'dismissed'
+        ) THEN
+            ALTER TABLE faces ADD COLUMN dismissed BOOLEAN NOT NULL DEFAULT FALSE;
+        END IF;
+    END $$
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_faces_dismissed ON faces(dismissed) WHERE dismissed = TRUE",
 ]
 
 

@@ -53,6 +53,7 @@ def cluster_faces_job(ctx: JobContext) -> Dict[str, Any]:
                 FROM faces f
                 WHERE f.catalog_id = CAST(:cid AS uuid)
                   AND f.embedding IS NOT NULL
+                  AND f.dismissed = FALSE
                 """
             ),
             {"cid": catalog_id},

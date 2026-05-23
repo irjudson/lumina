@@ -803,6 +803,7 @@ class Face(Base):
         ForeignKey("collections.id", ondelete="SET NULL"),
         nullable=True,
     )
+    dismissed = Column(Boolean, nullable=False, default=False)
     detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
     catalog = relationship("Catalog", backref="faces")

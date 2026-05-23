@@ -4270,3 +4270,77 @@ def dismiss_all_skipped_imports(
     db.commit()
 
     return {"dismissed": dismissed}
+
+
+# --- Face Detection Endpoints ---
+
+
+@router.get("/{catalog_id}/images/{image_id}/faces")
+def get_image_faces(
+    catalog_id: uuid.UUID,
+    image_id: str,
+    db: Session = Depends(get_db),
+):
+    """Return all detected faces for an image, including person name if assigned."""
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                f.id,
+                f.bbox_x, f.bbox_y, f.bbox_w, f.bbox_h,
+                f.detection_score,
+                f.person_collection_id,
+                f.dismissed,
+                c.name AS person_name
+            FROM faces f
+            LEFT JOIN collections c ON c.id = f.person_collection_id
+            WHERE f.image_id = :image_id
+              AND f.catalog_id = CAST(:cid AS uuid)
+            ORDER BY f.bbox_x
+            """
+        ),
+        {"image_id": image_id, "cid": str(catalog_id)},
+    ).fetchall()
+
+    return {
+        "faces": [
+            {
+                "id": str(r[0]),
+                "bbox_x": r[1],
+                "bbox_y": r[2],
+                "bbox_w": r[3],
+                "bbox_h": r[4],
+                "detection_score": round(r[5], 3),
+                "person_collection_id": str(r[6]) if r[6] else None,
+                "dismissed": bool(r[7]),
+                "person_name": r[8],
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.patch("/{catalog_id}/faces/{face_id}/dismiss")
+def dismiss_face(
+    catalog_id: uuid.UUID,
+    face_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    """Mark a face as dismissed — excluded from future clustering."""
+    from ...db.models import Face
+
+    face = (
+        db.query(Face).filter(Face.id == face_id, Face.catalog_id == catalog_id).first()
+    )
+    if not face:
+        raise HTTPException(status_code=404, detail="Face not found")
+
+    face.dismissed = True
+    face.person_collection_id = None
+    db.commit()
+
+    return {"status": "dismissed", "face_id": str(face_id)}
