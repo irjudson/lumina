@@ -383,26 +383,113 @@ _ROAD_TOKENS = {
 }
 
 
-def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
-    """Return a human-readable place name for coordinates via Nominatim.
+# Priority order for Overpass named-place types (lower = higher priority)
+_OVERPASS_PRIORITY: Dict[str, int] = {
+    "national_park": 1,
+    "protected_area": 2,
+    "forest": 3,
+    "nature_reserve": 4,
+    "museum": 5,
+    "attraction": 6,
+    "zoo": 6,
+    "theme_park": 6,
+    "aquarium": 6,
+    "gallery": 7,
+    "park": 8,
+    "garden": 9,
+}
 
-    Prefers specific names (city/town/suburb/park) over generic county names,
-    and appends US state abbreviation for context.
+
+def _overpass_named_place(lat: float, lon: float) -> Optional[str]:
+    """Find the named park/reserve/attraction the point is inside, via Overpass API.
+
+    Uses is_in to find enclosing named boundaries (national parks, forests, reserves)
+    and a short-radius search for nearby tourist POIs (museums, attractions).
+    Only called when Nominatim returns a county-only result.
+    """
+    query = f"""[out:json][timeout:12];
+(
+  is_in({lat:.5f},{lon:.5f})->.here;
+  way(pivot.here)[name][boundary~"national_park|protected_area|forest"];
+  relation(pivot.here)[name][boundary~"national_park|protected_area|forest"];
+  way(pivot.here)[name][leisure~"nature_reserve|park|garden"];
+  relation(pivot.here)[name][leisure~"nature_reserve|park|garden"];
+  way(pivot.here)[name][landuse~"forest|conservation"];
+  relation(pivot.here)[name][landuse~"forest|conservation"];
+  node(around:500,{lat:.5f},{lon:.5f})[name][tourism~"museum|attraction|zoo|theme_park|aquarium|gallery"];
+  way(around:500,{lat:.5f},{lon:.5f})[name][tourism~"museum|attraction|zoo|theme_park|aquarium|gallery"];
+);
+out 30 tags center;"""
+    try:
+        req = urllib.request.Request(
+            "https://overpass-api.de/api/interpreter",
+            data=query.encode(),
+            headers={"User-Agent": "Lumina/2.0", "Content-Type": "text/plain"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            elements = json.loads(resp.read()).get("elements", [])
+    except Exception:
+        return None
+
+    if not elements:
+        return None
+
+    # Score each element by type priority; prefer large named areas over small nodes
+    def _score(el: dict) -> int:
+        tags = el.get("tags", {})
+        for field in ("boundary", "leisure", "landuse", "tourism"):
+            val = tags.get(field, "")
+            if val in _OVERPASS_PRIORITY:
+                # Prefer relations (large areas) over ways over nodes
+                type_bonus = {"relation": 0, "way": 100, "node": 200}.get(
+                    el.get("type", "node"), 200
+                )
+                return _OVERPASS_PRIORITY[val] * 10 + type_bonus
+        return 9999
+
+    best = min(elements, key=_score)
+    name = best.get("tags", {}).get("name")
+    # Skip very generic single-word names like "Park" or "Forest"
+    if (
+        name
+        and len(name.split()) == 1
+        and name.lower() in ("park", "forest", "garden", "reserve")
+    ):
+        return None
+    return name
+
+
+def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
+    """Return a human-readable place name for coordinates.
+
+    Pass 1 — Nominatim: returns city/town for urban areas.
+    Pass 2 — Overpass: used only when Nominatim finds no city (parks, rural areas);
+              finds the named boundary the point is inside (national park, forest, etc.)
+              or nearby tourist POIs (museum, attraction).
+    Always appends state/region abbreviation for context.
     """
     key = f"{lat:.2f},{lon:.2f}"
     if key in _geocode_cache:
         return _geocode_cache[key]
-    url = (
+
+    nom_url = (
         f"https://nominatim.openstreetmap.org/reverse"
         f"?format=json&lat={lat:.6f}&lon={lon:.6f}&zoom=12&addressdetails=1"
     )
+    state = ""
+    country_code = ""
+    county = None
+    place = None
+
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Lumina/2.0"})
+        req = urllib.request.Request(nom_url, headers={"User-Agent": "Lumina/2.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         addr = data.get("address", {})
+        state = addr.get("state") or addr.get("province") or addr.get("region") or ""
+        country_code = addr.get("country_code", "").upper()
+        county = addr.get("county")
 
-        # Prefer specific populated-place names
         place = (
             addr.get("city")
             or addr.get("town")
@@ -412,38 +499,28 @@ def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
             or addr.get("municipality")
             or addr.get("city_district")
         )
+    except Exception:
+        pass
 
-        # For parks, forests, and other named natural areas, the display_name
-        # often starts with the park name before the road/county.
-        if not place:
-            display = data.get("display_name", "")
-            first = display.split(",")[0].strip() if display else ""
-            lower = first.lower()
-            # Accept named places but skip bare road names and numbers
-            if (
-                first
-                and not any(tok in lower for tok in _ROAD_TOKENS)
-                and not first[0].isdigit()
-            ):
-                place = first
+    # Pass 2: Overpass for parks/reserves/attractions when no city found
+    if not place:
+        time.sleep(1.0)  # respect rate limits before second external call
+        named = _overpass_named_place(lat, lon)
+        if named:
+            place = named
+        else:
+            place = county  # last resort: county name
 
-        if not place:
-            place = addr.get("county")
-
-        # Append state abbreviation for US locations
-        state = addr.get("state") or addr.get("province") or addr.get("region") or ""
-        country_code = addr.get("country_code", "").upper()
-        if place and state and country_code == "US":
+    # Append state/region abbreviation
+    if place and state:
+        if country_code == "US":
             abbr = _US_STATE_ABBR.get(state, state)
             place = f"{place}, {abbr}"
-        elif place and state and country_code != "US":
+        else:
             place = f"{place}, {state}"
 
-        _geocode_cache[key] = place
-        return place
-    except Exception:
-        _geocode_cache[key] = None
-        return None
+    _geocode_cache[key] = place
+    return place
 
 
 def _trip_name(start: date, end: date, location: Optional[str] = None) -> str:
