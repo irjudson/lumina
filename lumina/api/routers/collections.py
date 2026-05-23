@@ -32,6 +32,7 @@ class UpdateCollectionRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     cover_image_id: Optional[str] = None
+    parent_id: Optional[str] = None  # re-parent (move into a group)
 
 
 class CollectionListItem(BaseModel):
@@ -271,6 +272,22 @@ def update_collection(
         collection.description = request.description
     if request.cover_image_id is not None:
         collection.cover_image_id = request.cover_image_id
+    if request.parent_id is not None:
+        try:
+            parent_uuid = uuid.UUID(request.parent_id)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid parent_id UUID")
+        parent = (
+            db.query(Collection)
+            .filter(
+                Collection.id == parent_uuid,
+                Collection.catalog_id == catalog_id,
+            )
+            .first()
+        )
+        if not parent:
+            raise HTTPException(status_code=404, detail="Parent collection not found")
+        collection.parent_id = parent_uuid
 
     collection.updated_at = datetime.utcnow()
     db.commit()

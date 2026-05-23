@@ -180,12 +180,14 @@ export interface CollectionDetail {
 export interface CreateCollectionRequest {
   name: string
   description?: string
+  parent_id?: string
 }
 
 export interface UpdateCollectionRequest {
   name?: string
   description?: string
   cover_image_id?: string
+  parent_id?: string | null
 }
 
 // --- Events Interfaces ---
