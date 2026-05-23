@@ -304,29 +304,143 @@ _MONTHS = [
 
 _geocode_cache: Dict[str, Optional[str]] = {}
 
+_US_STATE_ABBR: Dict[str, str] = {
+    "Alabama": "AL",
+    "Alaska": "AK",
+    "Arizona": "AZ",
+    "Arkansas": "AR",
+    "California": "CA",
+    "Colorado": "CO",
+    "Connecticut": "CT",
+    "Delaware": "DE",
+    "Florida": "FL",
+    "Georgia": "GA",
+    "Hawaii": "HI",
+    "Idaho": "ID",
+    "Illinois": "IL",
+    "Indiana": "IN",
+    "Iowa": "IA",
+    "Kansas": "KS",
+    "Kentucky": "KY",
+    "Louisiana": "LA",
+    "Maine": "ME",
+    "Maryland": "MD",
+    "Massachusetts": "MA",
+    "Michigan": "MI",
+    "Minnesota": "MN",
+    "Mississippi": "MS",
+    "Missouri": "MO",
+    "Montana": "MT",
+    "Nebraska": "NE",
+    "Nevada": "NV",
+    "New Hampshire": "NH",
+    "New Jersey": "NJ",
+    "New Mexico": "NM",
+    "New York": "NY",
+    "North Carolina": "NC",
+    "North Dakota": "ND",
+    "Ohio": "OH",
+    "Oklahoma": "OK",
+    "Oregon": "OR",
+    "Pennsylvania": "PA",
+    "Rhode Island": "RI",
+    "South Carolina": "SC",
+    "South Dakota": "SD",
+    "Tennessee": "TN",
+    "Texas": "TX",
+    "Utah": "UT",
+    "Vermont": "VT",
+    "Virginia": "VA",
+    "Washington": "WA",
+    "West Virginia": "WV",
+    "Wisconsin": "WI",
+    "Wyoming": "WY",
+    "District of Columbia": "DC",
+}
+
+# Road/address tokens that should not be used as a place name
+_ROAD_TOKENS = {
+    "road",
+    "rd",
+    "street",
+    "st",
+    "avenue",
+    "ave",
+    "drive",
+    "dr",
+    "lane",
+    "ln",
+    "way",
+    "blvd",
+    "boulevard",
+    "highway",
+    "hwy",
+    "route",
+    "trail",
+    "path",
+    "unnamed",
+    "county road",
+}
+
 
 def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
-    """Return city/town name for coordinates via Nominatim. Returns None on failure."""
+    """Return a human-readable place name for coordinates via Nominatim.
+
+    Prefers specific names (city/town/suburb/park) over generic county names,
+    and appends US state abbreviation for context.
+    """
     key = f"{lat:.2f},{lon:.2f}"
     if key in _geocode_cache:
         return _geocode_cache[key]
     url = (
         f"https://nominatim.openstreetmap.org/reverse"
-        f"?format=json&lat={lat:.6f}&lon={lon:.6f}&zoom=10"
+        f"?format=json&lat={lat:.6f}&lon={lon:.6f}&zoom=12&addressdetails=1"
     )
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Lumina/2.0"})
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
         addr = data.get("address", {})
-        city = (
+
+        # Prefer specific populated-place names
+        place = (
             addr.get("city")
             or addr.get("town")
+            or addr.get("suburb")
             or addr.get("village")
-            or addr.get("county")
+            or addr.get("hamlet")
+            or addr.get("municipality")
+            or addr.get("city_district")
         )
-        _geocode_cache[key] = city
-        return city
+
+        # For parks, forests, and other named natural areas, the display_name
+        # often starts with the park name before the road/county.
+        if not place:
+            display = data.get("display_name", "")
+            first = display.split(",")[0].strip() if display else ""
+            lower = first.lower()
+            # Accept named places but skip bare road names and numbers
+            if (
+                first
+                and not any(tok in lower for tok in _ROAD_TOKENS)
+                and not first[0].isdigit()
+            ):
+                place = first
+
+        if not place:
+            place = addr.get("county")
+
+        # Append state abbreviation for US locations
+        state = addr.get("state") or addr.get("province") or addr.get("region") or ""
+        country_code = addr.get("country_code", "").upper()
+        if place and state and country_code == "US":
+            abbr = _US_STATE_ABBR.get(state, state)
+            place = f"{place}, {abbr}"
+        elif place and state and country_code != "US":
+            place = f"{place}, {state}"
+
+        _geocode_cache[key] = place
+        return place
     except Exception:
         _geocode_cache[key] = None
         return None
