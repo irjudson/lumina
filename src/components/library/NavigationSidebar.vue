@@ -72,7 +72,20 @@
               <template v-for="child in childrenOf(col.id)" :key="child.id">
                 <!-- If the child itself has children it's a group (e.g. "My Family") -->
                 <template v-if="child.childCount > 0 || groupChildrenOf(child.id).length > 0">
-                  <div class="flex items-center gap-1 group/grp">
+                  <div
+                    class="flex items-center gap-1 group/draggable rounded transition-colors"
+                    :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === child.id }"
+                    draggable="true"
+                    @dragstart="onDragStart($event, child)"
+                    @dragover="onDragOver($event, child)"
+                    @dragleave="onDragLeave"
+                    @drop="onDrop($event, child)"
+                    @dragend="onDragEnd"
+                  >
+                    <span
+                      class="shrink-0 w-3 cursor-grab text-gray-700 opacity-0 group-hover/draggable:opacity-100 transition-opacity select-none"
+                      title="Drag to reorder"
+                    >⠿</span>
                     <button
                       @click.stop="toggleExpanded(child.id)"
                       class="shrink-0 p-1 text-gray-600 hover:text-gray-400 transition-colors"
@@ -99,7 +112,22 @@
                   </div>
                   <!-- Group children (Person N) -->
                   <div v-if="expandedCategories.has(child.id)" class="pl-5 space-y-0.5">
-                    <div v-for="grandchild in groupChildrenOf(child.id)" :key="grandchild.id" class="flex items-center gap-1">
+                    <div
+                      v-for="grandchild in groupChildrenOf(child.id)"
+                      :key="grandchild.id"
+                      class="flex items-center gap-1 group/draggable rounded transition-colors"
+                      :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === grandchild.id }"
+                      draggable="true"
+                      @dragstart="onDragStart($event, grandchild)"
+                      @dragover="onDragOver($event, grandchild)"
+                      @dragleave="onDragLeave"
+                      @drop="onDrop($event, grandchild)"
+                      @dragend="onDragEnd"
+                    >
+                      <span
+                        class="shrink-0 w-3 cursor-grab text-gray-700 opacity-0 group-hover/draggable:opacity-100 transition-opacity select-none"
+                        title="Drag to reorder"
+                      >⠿</span>
                       <CollectionLabel
                         :collection="grandchild"
                         :active="activeView === `collection:${grandchild.id}`"
@@ -123,7 +151,20 @@
 
                 <!-- Leaf child (no sub-children) -->
                 <template v-else>
-                  <div class="flex items-center gap-1">
+                  <div
+                    class="flex items-center gap-1 group/draggable rounded transition-colors"
+                    :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === child.id }"
+                    draggable="true"
+                    @dragstart="onDragStart($event, child)"
+                    @dragover="onDragOver($event, child)"
+                    @dragleave="onDragLeave"
+                    @drop="onDrop($event, child)"
+                    @dragend="onDragEnd"
+                  >
+                    <span
+                      class="shrink-0 w-3 cursor-grab text-gray-700 opacity-0 group-hover/draggable:opacity-100 transition-opacity select-none"
+                      title="Drag to reorder"
+                    >⠿</span>
                     <CollectionLabel
                       :collection="child"
                       :active="activeView === `collection:${child.id}`"
@@ -242,6 +283,23 @@
         >
           <PencilIcon class="w-3.5 h-3.5" /> Rename
         </button>
+        <!-- Person-specific actions -->
+        <template v-if="contextMenu.collection.systemKey?.startsWith('people_person:') || contextMenu.collection.systemKey?.startsWith('people_group:')">
+          <div class="border-t border-gray-700 my-1" />
+          <button
+            v-if="contextMenu.collection.systemKey?.startsWith('people_person:')"
+            @click="openMergePicker(contextMenu!.collection)"
+            class="w-full px-3 py-1.5 text-left text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+          >
+            <UsersIcon class="w-3.5 h-3.5" /> Merge with…
+          </button>
+          <button
+            @click="ignorePerson(contextMenu!.collection); closeContextMenu()"
+            class="w-full px-3 py-1.5 text-left text-red-400 hover:bg-gray-700 hover:text-red-300 flex items-center gap-2"
+          >
+            <XCircleIcon class="w-3.5 h-3.5" /> Ignore this person
+          </button>
+        </template>
         <template v-if="availableGroups(contextMenu.collection).length > 0 || peopleParentOf(contextMenu.collection)">
           <div class="border-t border-gray-700 my-1" />
           <p class="px-3 py-1 text-xs text-gray-500 font-medium">Move to group</p>
@@ -261,6 +319,41 @@
             <FolderPlusIcon class="w-3.5 h-3.5" /> New group…
           </button>
         </template>
+      </div>
+    </Teleport>
+
+    <!-- Merge picker modal -->
+    <Teleport to="body">
+      <div
+        v-if="mergePicker"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+        @click.self="mergePicker = null"
+      >
+        <div class="bg-gray-800 border border-gray-700 rounded-lg p-4 w-80 shadow-xl flex flex-col gap-3">
+          <p class="text-sm font-medium text-gray-200">
+            Merge <span class="text-blue-400">{{ mergePicker.source.name }}</span> into…
+          </p>
+          <p class="text-xs text-gray-400 -mt-2">The source collection is deleted; its face embeddings teach the detector they're the same person.</p>
+          <input
+            v-model="mergeSearch"
+            type="text"
+            placeholder="Search people…"
+            class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
+          />
+          <div class="max-h-64 overflow-y-auto space-y-0.5">
+            <button
+              v-for="cand in mergePickerCandidates"
+              :key="cand.id"
+              @click="confirmMerge(cand)"
+              class="w-full px-3 py-2 text-left rounded hover:bg-gray-700 flex items-center justify-between gap-2"
+            >
+              <span class="text-sm text-gray-200 truncate">{{ cand.name }}</span>
+              <span class="text-xs text-gray-500 shrink-0">{{ cand.imageCount }} photos</span>
+            </button>
+            <p v-if="mergePickerCandidates.length === 0" class="text-xs text-gray-500 px-3 py-2">No matches</p>
+          </div>
+          <button @click="mergePicker = null" class="self-end text-xs text-gray-500 hover:text-gray-300">Cancel</button>
+        </div>
       </div>
     </Teleport>
 
@@ -321,6 +414,8 @@ import {
   Pencil as PencilIcon,
   FolderOpen as FolderOpenIcon,
   FolderPlus as FolderPlusIcon,
+  Users as UsersIcon,
+  XCircle as XCircleIcon,
 } from 'lucide-vue-next'
 
 import NavItem from './NavItem.vue'
@@ -405,11 +500,56 @@ const userCollections = computed(() =>
 )
 
 function childrenOf(parentId: string): Collection[] {
-  return (props.collections ?? []).filter(c => c.parentId === parentId)
+  const all = (props.collections ?? []).filter(c => c.parentId === parentId)
+  return collectionsStore.sortSiblings(all)
 }
 
 function groupChildrenOf(groupId: string): Collection[] {
-  return (props.collections ?? []).filter(c => c.parentId === groupId)
+  const all = (props.collections ?? []).filter(c => c.parentId === groupId)
+  return collectionsStore.sortSiblings(all)
+}
+
+// ── Drag-to-reorder ──────────────────────────────────────────────────────────
+
+const dragging = ref<{ id: string; parentId: string } | null>(null)
+const dragOver = ref<string | null>(null)  // id of item currently hovered
+
+function onDragStart(e: DragEvent, col: Collection) {
+  if (!col.parentId) return
+  dragging.value = { id: col.id, parentId: col.parentId }
+  e.dataTransfer!.effectAllowed = 'move'
+}
+
+function onDragOver(e: DragEvent, col: Collection) {
+  if (!dragging.value || dragging.value.parentId !== col.parentId) return
+  e.preventDefault()
+  e.dataTransfer!.dropEffect = 'move'
+  dragOver.value = col.id
+}
+
+function onDragLeave() {
+  dragOver.value = null
+}
+
+async function onDrop(e: DragEvent, target: Collection) {
+  e.preventDefault()
+  dragOver.value = null
+  if (!dragging.value || dragging.value.parentId !== target.parentId) return
+  const { id: draggedId, parentId } = dragging.value
+  dragging.value = null
+  if (draggedId === target.id) return
+
+  // Build new order: insert dragged item before the target
+  const siblings = childrenOf(parentId)
+  const without = siblings.filter(c => c.id !== draggedId)
+  const targetIdx = without.findIndex(c => c.id === target.id)
+  without.splice(targetIdx, 0, siblings.find(c => c.id === draggedId)!)
+  await collectionsStore.reorderChildren(parentId, without.map(c => c.id))
+}
+
+function onDragEnd() {
+  dragging.value = null
+  dragOver.value = null
 }
 
 // ── Rename ──────────────────────────────────────────────────────────────────
@@ -420,12 +560,16 @@ function startRename(col: Collection) {
   renaming.value = { id: col.id, value: col.name }
 }
 
+async function ignorePerson(col: Collection) {
+  await collectionsStore.ignorePersonCollection(col.id)
+}
+
 async function saveRename() {
   if (!renaming.value) return
   const { id, value } = renaming.value
   const trimmed = value.trim()
   if (trimmed) {
-    await collectionsStore.updateCollection(id, { name: trimmed })
+    await collectionsStore.updateCollection(id, { name: trimmed, userRenamed: true })
   }
   renaming.value = null
 }
@@ -501,5 +645,39 @@ async function confirmNewGroup() {
   if (moveCollectionId) {
     await collectionsStore.updateCollection(moveCollectionId, { parentId: group.id })
   }
+}
+
+// ── Merge picker ──────────────────────────────────────────────────────────────
+
+const mergePicker = ref<{ source: Collection } | null>(null)
+const mergeSearch = ref('')
+
+const mergePickerCandidates = computed(() => {
+  if (!mergePicker.value) return []
+  const src = mergePicker.value.source
+  const query = mergeSearch.value.toLowerCase()
+  return (props.collections ?? [])
+    .filter(c =>
+      c.id !== src.id &&
+      c.parentId != null &&           // only sub-collections (not top-level)
+      c.systemKey?.startsWith('people_person:') !== false &&
+      !c.systemKey?.startsWith('people:') &&   // exclude group folders
+      (query === '' || c.name.toLowerCase().includes(query))
+    )
+    .sort((a, b) => (b.imageCount ?? 0) - (a.imageCount ?? 0))
+    .slice(0, 30)
+})
+
+function openMergePicker(col: Collection) {
+  closeContextMenu()
+  mergeSearch.value = ''
+  mergePicker.value = { source: col }
+}
+
+async function confirmMerge(target: Collection) {
+  if (!mergePicker.value) return
+  const source = mergePicker.value.source
+  mergePicker.value = null
+  await collectionsStore.mergeCollections(target.id, source.id)
 }
 </script>

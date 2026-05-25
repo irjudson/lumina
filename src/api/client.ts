@@ -160,6 +160,8 @@ export interface CollectionListItem {
   source: 'user' | 'system'
   system_key?: string | null
   parent_id?: string | null
+  user_renamed?: boolean
+  sort_position?: number | null
   created_at: string
   updated_at: string
 }
@@ -188,6 +190,8 @@ export interface UpdateCollectionRequest {
   description?: string
   cover_image_id?: string
   parent_id?: string | null
+  user_renamed?: boolean
+  sort_position?: number | null
 }
 
 // --- Events Interfaces ---
@@ -465,6 +469,37 @@ class ApiClient {
     await this.client.delete(`/catalogs/${catalogId}/collections/${collectionId}`)
   }
 
+  async ignorePersonCollection(catalogId: string, collectionId: string): Promise<{ status: string }> {
+    const response = await this.client.post<{ status: string }>(
+      `/catalogs/${catalogId}/collections/${collectionId}/ignore-person`
+    )
+    return response.data
+  }
+
+  async removeFaceMatch(catalogId: string, collectionId: string, imageId: string): Promise<{ status: string }> {
+    const response = await this.client.post<{ status: string }>(
+      `/catalogs/${catalogId}/collections/${collectionId}/remove-face-match`,
+      { image_id: imageId }
+    )
+    return response.data
+  }
+
+  async reorderCollections(catalogId: string, parentId: string, orderedIds: string[]): Promise<{ reordered: number }> {
+    const response = await this.client.post<{ reordered: number }>(
+      `/catalogs/${catalogId}/collections/reorder`,
+      { parent_id: parentId, ordered_ids: orderedIds }
+    )
+    return response.data
+  }
+
+  async mergeCollections(catalogId: string, targetId: string, sourceId: string): Promise<{ status: string; image_count: number }> {
+    const response = await this.client.post<{ status: string; image_count: number }>(
+      `/catalogs/${catalogId}/collections/${targetId}/merge`,
+      { source_id: sourceId }
+    )
+    return response.data
+  }
+
   async addImagesToCollection(catalogId: string, collectionId: string, imageIds: string[]): Promise<{ added: number }> {
     const response = await this.client.post<{ added: number }>(`/catalogs/${catalogId}/collections/${collectionId}/images`, { image_ids: imageIds })
     return response.data
@@ -482,6 +517,30 @@ class ApiClient {
 
   async rejectCollectionMemberships(catalogId: string, collectionId: string, imageIds: string[]): Promise<{ rejected: number }> {
     const response = await this.client.post<{ rejected: number }>(`/catalogs/${catalogId}/collections/${collectionId}/reject`, { image_ids: imageIds })
+    return response.data
+  }
+
+  // --- Faces ---
+
+  async getImageFaces(catalogId: string, imageId: string): Promise<{
+    faces: Array<{
+      id: string
+      bbox_x: number
+      bbox_y: number
+      bbox_w: number
+      bbox_h: number
+      detection_score: number
+      person_collection_id: string | null
+      dismissed: boolean
+      person_name: string | null
+    }>
+  }> {
+    const response = await this.client.get(`/catalogs/${catalogId}/images/${imageId}/faces`)
+    return response.data
+  }
+
+  async dismissFace(catalogId: string, faceId: string): Promise<{ status: string; face_id: string }> {
+    const response = await this.client.patch(`/catalogs/${catalogId}/faces/${faceId}/dismiss`)
     return response.data
   }
 

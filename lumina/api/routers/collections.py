@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import case, func
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
 from ...db import get_db
@@ -33,6 +33,13 @@ class UpdateCollectionRequest(BaseModel):
     description: Optional[str] = None
     cover_image_id: Optional[str] = None
     parent_id: Optional[str] = None  # re-parent (move into a group)
+    user_renamed: Optional[bool] = None
+    sort_position: Optional[int] = None
+
+
+class ReorderRequest(BaseModel):
+    parent_id: str
+    ordered_ids: List[str]  # IDs in desired display order; sets sort_position 0, 1, 2…
 
 
 class CollectionListItem(BaseModel):
@@ -46,6 +53,8 @@ class CollectionListItem(BaseModel):
     source: str
     system_key: Optional[str] = None
     parent_id: Optional[str] = None
+    user_renamed: bool = False
+    sort_position: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
@@ -168,6 +177,8 @@ def list_collections(
             source=c.source,
             system_key=c.system_key,
             parent_id=str(c.parent_id) if c.parent_id else None,
+            user_renamed=bool(getattr(c, "user_renamed", False)),
+            sort_position=getattr(c, "sort_position", None),
             created_at=c.created_at,
             updated_at=c.updated_at,
         )
@@ -268,10 +279,16 @@ def update_collection(
 
     if request.name is not None:
         collection.name = request.name
+        # Any explicit rename marks this collection as user-renamed
+        collection.user_renamed = True
     if request.description is not None:
         collection.description = request.description
     if request.cover_image_id is not None:
         collection.cover_image_id = request.cover_image_id
+    if request.user_renamed is not None:
+        collection.user_renamed = request.user_renamed
+    if request.sort_position is not None:
+        collection.sort_position = request.sort_position
     if request.parent_id is not None:
         try:
             parent_uuid = uuid.UUID(request.parent_id)
@@ -334,6 +351,51 @@ def delete_collection(
     db.delete(collection)
     db.commit()
     return {"status": "deleted"}
+
+
+@router.post("/{catalog_id}/collections/{collection_id}/ignore-person")
+def ignore_person_collection(
+    catalog_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Dismiss all faces belonging to a person collection (or group of persons) and delete it.
+
+    Dismissed faces are excluded from future face-clustering runs, so the person
+    will not reappear automatically.  Works on both individual person sub-collections
+    and group collections (dismisses faces for every child in the group).
+    """
+    collection = _get_collection_or_404(db, catalog_id, collection_id)
+
+    # Collect the collection ID plus all child IDs (handles both leaf and group)
+    ids_to_dismiss: List[str] = [str(collection_id)]
+    children = (
+        db.query(Collection.id)
+        .filter(
+            Collection.catalog_id == catalog_id,
+            Collection.parent_id == collection_id,
+        )
+        .all()
+    )
+    for (child_id,) in children:
+        ids_to_dismiss.append(str(child_id))
+
+    # Dismiss every face that was assigned to any of these collections
+    db.execute(
+        text(
+            """
+            UPDATE faces
+            SET dismissed = TRUE, person_collection_id = NULL
+            WHERE person_collection_id = ANY(CAST(:ids AS uuid[]))
+            """
+        ),
+        {"ids": ids_to_dismiss},
+    )
+
+    # Delete the collection (CASCADE removes children)
+    db.delete(collection)
+    db.commit()
+    return {"status": "ignored", "faces_dismissed": len(ids_to_dismiss)}
 
 
 class MergeCollectionRequest(BaseModel):
@@ -569,3 +631,79 @@ def reject_memberships(
 
     db.commit()
     return {"rejected": removed}
+
+
+class RemoveFaceMatchRequest(BaseModel):
+    image_id: str
+
+
+@router.post("/{catalog_id}/collections/{collection_id}/remove-face-match")
+def remove_face_match(
+    catalog_id: uuid.UUID,
+    collection_id: uuid.UUID,
+    request: RemoveFaceMatchRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Remove an incorrect face match from a person collection.
+
+    Removes the image from the collection and resets the face's person_collection_id
+    to NULL so it can be re-assigned by the next clustering run.  Unlike ignore-person,
+    the face is NOT dismissed and will reappear in future clustering.
+    """
+    _get_collection_or_404(db, catalog_id, collection_id)
+    image_uuid = uuid.UUID(request.image_id)
+
+    # Remove image from collection
+    db.query(CollectionImage).filter(
+        CollectionImage.collection_id == collection_id,
+        CollectionImage.image_id == image_uuid,
+    ).delete(synchronize_session=False)
+
+    # Reset face assignment (but do NOT dismiss — faces should be re-clustered)
+    db.execute(
+        text(
+            """
+            UPDATE faces
+            SET person_collection_id = NULL
+            WHERE image_id = CAST(:iid AS uuid)
+              AND person_collection_id = CAST(:cid AS uuid)
+              AND dismissed = FALSE
+            """
+        ),
+        {"iid": str(image_uuid), "cid": str(collection_id)},
+    )
+
+    db.commit()
+    return {"status": "removed"}
+
+
+@router.post("/{catalog_id}/collections/reorder")
+def reorder_collections(
+    catalog_id: uuid.UUID,
+    request: ReorderRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Set sort_position for a list of siblings in the given order.
+
+    Accepts an ordered list of collection IDs; assigns sort_position 0, 1, 2…
+    All other children of the same parent have their sort_position cleared (NULL)
+    so they fall into auto-sort order below the manually positioned items.
+    """
+    _get_catalog_or_404(db, catalog_id)
+    parent_uuid = uuid.UUID(request.parent_id)
+
+    # Clear sort_position for all children of this parent first
+    db.query(Collection).filter(
+        Collection.catalog_id == catalog_id,
+        Collection.parent_id == parent_uuid,
+    ).update({"sort_position": None}, synchronize_session=False)
+
+    # Assign positions in the given order
+    for pos, col_id in enumerate(request.ordered_ids):
+        db.query(Collection).filter(
+            Collection.id == uuid.UUID(col_id),
+            Collection.catalog_id == catalog_id,
+        ).update({"sort_position": pos}, synchronize_session=False)
+
+    db.commit()
+    return {"reordered": len(request.ordered_ids)}

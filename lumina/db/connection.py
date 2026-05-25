@@ -194,6 +194,12 @@ def init_db() -> None:
     upgrade_backup_dest(engine)
     logger.info("backup_destinations migration applied")
 
+    # Add user_renamed and sort_position to collections (idempotent)
+    from .migrations.collection_sort import upgrade as upgrade_collection_sort
+
+    upgrade_collection_sort(engine)
+    logger.info("collection_sort migration applied")
+
     # Populate reference tables
     db = SessionLocal()
     try:

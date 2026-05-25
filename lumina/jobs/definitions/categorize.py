@@ -35,8 +35,16 @@ logger = logging.getLogger(__name__)
 # Travel thresholds
 TRAVEL_DISTANCE_KM = 150
 TRAVEL_WINDOW_DAYS = 30
-TRAVEL_MIN_IMAGES_PER_DAY = 2
-TRIP_MAX_GAP_DAYS = 3  # days without photos before a new trip starts
+TRAVEL_MIN_IMAGES_PER_DAY = (
+    3  # min photos in a day to count as travel (filters glitches)
+)
+TRIP_MAX_GAP_DAYS = 5  # days without photos before a new trip segment starts
+TRIP_MIN_DAYS = 2  # trip must span at least this many calendar days
+TRIP_MIN_IMAGES = 5  # trip must have at least this many images
+HOME_BASE_CELL_MIN_FRACTION = (
+    0.05  # 1°×1° cells with ≥5% of geotagged photos = home base
+)
+HOME_BASE_RADIUS_KM = 100  # within this radius of a home cell centroid = "at home"
 
 # Content classes that indicate noise
 NOISE_CLASSES = {"invalid", "meme", "received", "social_media"}
@@ -64,6 +72,58 @@ def _centroid(points: List[Tuple[float, float]]) -> Optional[Tuple[float, float]
         sum(p[0] for p in points) / len(points),
         sum(p[1] for p in points) / len(points),
     )
+
+
+def _trip_representative_point(
+    pts: List[Tuple[float, float]],
+) -> Optional[Tuple[float, float]]:
+    """Centroid of the most-photographed 1° grid cell.
+
+    Simple mean fails for trips that include a long flight/drive: the centroid
+    ends up in the ocean or in an empty desert between home and destination.
+    This picks the 1°×1° cell where the user spent the most time (most photos),
+    then returns the centroid of just those coordinates.
+    """
+    if not pts:
+        return None
+    if len(pts) <= 3:
+        return _centroid(pts)
+    cells: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    for lat, lon in pts:
+        cells.setdefault((int(lat), int(lon)), []).append((lat, lon))
+    best = max(cells.values(), key=len)
+    return _centroid(best)
+
+
+def _detect_home_bases(
+    timeline: List[Dict],
+) -> List[Tuple[float, float]]:
+    """Return centroids of high-density 1°×1° grid cells (home locations).
+
+    Any cell whose photo count is ≥ HOME_BASE_CELL_MIN_FRACTION of the total
+    qualifies as a home base.  Neighbouring cells that both qualify are each
+    kept as separate centroids so the radius check covers both halves of a
+    split metro (e.g. Seattle straddles two 1° lon bands).
+    """
+    total = len(timeline)
+    if total == 0:
+        return []
+    cell_pts: Dict[Tuple[int, int], List[Tuple[float, float]]] = {}
+    for img in timeline:
+        cell = (int(math.floor(img["lat"])), int(math.floor(img["lon"])))
+        cell_pts.setdefault(cell, []).append((img["lat"], img["lon"]))
+    threshold = total * HOME_BASE_CELL_MIN_FRACTION
+    homes: List[Tuple[float, float]] = []
+    for pts in cell_pts.values():
+        if len(pts) >= threshold:
+            c = _centroid(pts)
+            if c:
+                homes.append(c)
+    return homes
+
+
+def _is_near_home(lat: float, lon: float, homes: List[Tuple[float, float]]) -> bool:
+    return any(_haversine_km(lat, lon, h[0], h[1]) < HOME_BASE_RADIUS_KM for h in homes)
 
 
 # ─────────────────────────── Sub-collection upsert ───────────────────────────
@@ -408,8 +468,8 @@ def _overpass_named_place(lat: float, lon: float) -> Optional[str]:
     Only called when Nominatim returns a county-only result.
     """
     query = f"""[out:json][timeout:12];
+is_in({lat:.5f},{lon:.5f})->.here;
 (
-  is_in({lat:.5f},{lon:.5f})->.here;
   way(pivot.here)[name][boundary~"national_park|protected_area|forest"];
   relation(pivot.here)[name][boundary~"national_park|protected_area|forest"];
   way(pivot.here)[name][leisure~"nature_reserve|park|garden"];
@@ -448,12 +508,22 @@ out 30 tags center;"""
         return 9999
 
     best = min(elements, key=_score)
-    name = best.get("tags", {}).get("name")
-    # Skip very generic single-word names like "Park" or "Forest"
-    if (
-        name
-        and len(name.split()) == 1
-        and name.lower() in ("park", "forest", "garden", "reserve")
+    tags = best.get("tags", {})
+    # Prefer English name, fall back to primary OSM name
+    name = tags.get("name:en") or tags.get("name") or ""
+    # Strip multi-language format: "Foo - Bar - Baz" → "Foo"
+    if " - " in name:
+        name = name.split(" - ")[0].strip()
+    if not name:
+        return None
+    lower = name.lower()
+    # Skip generic one-word names
+    if len(name.split()) == 1 and lower in {"park", "forest", "garden", "reserve"}:
+        return None
+    # Skip institutional/infrastructure places
+    if any(
+        kw in lower
+        for kw in ("detention", "correctional", "prison", "jail", "landfill")
     ):
         return None
     return name
@@ -511,6 +581,30 @@ def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
         else:
             place = county  # last resort: county name
 
+    # Discard country-level names and ocean/timezone garbage
+    _country_names = {
+        "united states",
+        "united states of america",
+        "canada",
+        "russia",
+        "china",
+        "australia",
+        "mexico",
+        "brazil",
+        "india",
+        "france",
+        "germany",
+        "united kingdom",
+        "japan",
+    }
+    _bad_patterns = ("utc", "standard time", "timezone", "gmt")
+    if place:
+        lower_place = place.lower()
+        if lower_place in _country_names:
+            place = None
+        elif any(p in lower_place for p in _bad_patterns):
+            place = None
+
     # Append state/region abbreviation
     if place and state:
         if country_code == "US":
@@ -550,6 +644,8 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
                 FROM images
                 WHERE catalog_id = CAST(:cid AS uuid)
                   AND latitude IS NOT NULL AND longitude IS NOT NULL
+                  AND latitude BETWEEN -90 AND 90
+                  AND longitude BETWEEN -180 AND 180
                   AND capture_time IS NOT NULL
                   AND status_id NOT IN ('rejected', 'archived')
                 ORDER BY capture_time
@@ -565,11 +661,21 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
         {"id": r[0], "ts": r[1], "lat": float(r[2]), "lon": float(r[3])} for r in rows
     ]
 
-    # Step 1: flag travel images using GPS delta from surrounding window
+    # Step 1: detect home bases — high-density cells are excluded from travel flagging
+    home_bases = _detect_home_bases(timeline)
+    logger.info(
+        f"Home bases detected ({len(home_bases)}): "
+        + ", ".join(f"({h[0]:.2f},{h[1]:.2f})" for h in home_bases)
+    )
+
+    # Step 2: flag travel images using GPS delta from surrounding window,
+    #         but skip any image that is near a home base
     window_td = timedelta(days=TRAVEL_WINDOW_DAYS)
     travel_ids: set = set()
 
     for img in timeline:
+        if home_bases and _is_near_home(img["lat"], img["lon"], home_bases):
+            continue
         ts = img["ts"]
         same_day = ts.date()
         surrounding = [
@@ -603,7 +709,7 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
     if not travel_images:
         return {"total": 0}
 
-    # Step 2: group consecutive travel days into trips (gap <= TRIP_MAX_GAP_DAYS)
+    # Step 3: group consecutive travel days into trips (gap <= TRIP_MAX_GAP_DAYS)
     # Store (image_id, lat, lon) per day for centroid lookup
     by_date: Dict[date, List[Tuple[str, float, float]]] = {}
     for img in travel_images:
@@ -622,17 +728,27 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
             current = [d]
     trips.append(current)
 
-    # Step 3: create a sub-collection per trip
+    # Step 4: create a sub-collection per trip (skip micro-trips)
     trip_count = 0
     for trip_days in trips:
+        # Skip trips that are too short or have too few images
+        if len(trip_days) < TRIP_MIN_DAYS:
+            continue
+        all_ids_check = [
+            img_id for d in trip_days for img_id, _, _ in by_date.get(d, [])
+        ]
+        if len(all_ids_check) < TRIP_MIN_IMAGES:
+            continue
+
         start_d, end_d = trip_days[0], trip_days[-1]
         sys_key = f"travel_trip:{start_d.isoformat()}_{end_d.isoformat()}"
 
-        # Compute trip centroid and reverse-geocode for a location name
+        # Use the most-photographed 1° grid cell as the representative point.
+        # Simple centroid fails for trips that include a long flight/drive.
         all_pts = [(lat, lon) for d in trip_days for _, lat, lon in by_date.get(d, [])]
         location: Optional[str] = None
         if all_pts:
-            c = _centroid(all_pts)
+            c = _trip_representative_point(all_pts)
             if c:
                 location = _reverse_geocode_city(c[0], c[1])
                 time.sleep(1.1)  # Nominatim rate limit: 1 req/s

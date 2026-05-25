@@ -179,10 +179,35 @@
                   @select="handleImageSelect"
                   @open="handleImageOpen"
                   @load-more="libraryStore.fetchMore()"
+                  @contextmenu="openContextMenu"
                 />
               </div>
             </template>
           </div>
+
+          <!-- Image Context Menu -->
+          <div
+            v-if="contextMenu.visible"
+            class="fixed z-50 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[180px]"
+            :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+            @click.stop
+          >
+            <button
+              v-if="activePersonCollectionId"
+              class="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 flex items-center gap-2"
+              @click="removeFaceMatch"
+            >
+              Not this person
+            </button>
+          </div>
+
+          <!-- Click-away to close context menu -->
+          <div
+            v-if="contextMenu.visible"
+            class="fixed inset-0 z-40"
+            @click="closeContextMenu"
+            @contextmenu.prevent="closeContextMenu"
+          />
         </div>
       </template>
 
@@ -527,6 +552,28 @@
 
               <!-- Single Image Metadata -->
               <div v-if="libraryStore.selectedImages.length === 1" class="mt-4 pt-4 border-t border-gray-800 space-y-4">
+                <!-- Thumbnail preview with face overlay -->
+                <div class="relative flex justify-center">
+                  <div class="relative inline-block">
+                    <img
+                      ref="previewImgEl"
+                      :src="libraryStore.selectedImages[0].thumbnail_url + '?size=large'"
+                      class="max-w-full rounded block"
+                      style="max-height: 260px;"
+                      @load="onPreviewLoad"
+                    />
+                    <FaceOverlay
+                      v-if="selectedImageFaces.length > 0 && previewDisplayWidth > 0 && selectedImageMeta?.width"
+                      :faces="selectedImageFaces"
+                      :natural-width="selectedImageMeta.width"
+                      :natural-height="selectedImageMeta.height"
+                      :display-width="previewDisplayWidth"
+                      :display-height="previewDisplayHeight"
+                      @dismiss="dismissFace"
+                    />
+                  </div>
+                </div>
+
                 <!-- File -->
                 <div>
                   <h4 class="text-[10px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">File</h4>
@@ -636,7 +683,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, computed, ref, watch } from 'vue'
+import { onMounted, computed, ref, watch, nextTick } from 'vue'
 import { useLayoutStore } from '@/stores/layout'
 import { useLibraryStore } from '@/stores/library'
 import { useCatalogStore } from '@/stores/catalog'
@@ -660,6 +707,7 @@ import SkippedImportsView from '@/components/views/SkippedImportsView.vue'
 import ImageDetailOverlay from '@/components/views/ImageDetailOverlay.vue'
 import NavigationSidebar from '@/components/library/NavigationSidebar.vue'
 import FilterBar from '@/components/library/FilterBar.vue'
+import FaceOverlay from '@/components/library/FaceOverlay.vue'
 import { ImageIcon, SettingsIcon, LoaderIcon, AlertCircleIcon, Star as StarIcon, Folder as FolderIcon, Sparkles as SparklesIcon, Copy as CopyIcon, Zap as ZapIcon, ImagePlus as ImagePlusIcon, RefreshCw as RefreshCwIcon, ChevronDown as ChevronDownIcon, FileWarning as FileWarningIcon, RotateCcw as RotateCcwIcon, PartyPopper as PartyPopperIcon, Layers as LayersIcon, Users as UsersIcon } from 'lucide-vue-next'
 import type { Image, FileType, ImageStatus } from '@/stores/library'
 import CatalogSettings from '@/views/CatalogSettings.vue'
@@ -676,6 +724,38 @@ const collectionsStore = useCollectionsStore()
 // UI State
 const currentView = ref('all')
 const filterBarExpanded = ref(false)
+
+// Context menu state
+const contextMenu = ref<{ visible: boolean; x: number; y: number; imageId: string }>({
+  visible: false, x: 0, y: 0, imageId: ''
+})
+
+const activePersonCollectionId = computed(() => {
+  if (!currentView.value.startsWith('collection:')) return null
+  const id = currentView.value.substring('collection:'.length)
+  const col = collectionsStore.getCollection(id)
+  return col?.systemKey?.startsWith('people_person:') ? id : null
+})
+
+function openContextMenu(item: any, event: MouseEvent) {
+  contextMenu.value = { visible: true, x: event.clientX, y: event.clientY, imageId: item.id }
+}
+
+function closeContextMenu() {
+  contextMenu.value.visible = false
+}
+
+async function removeFaceMatch() {
+  if (!catalogStore.activeCatalog || !activePersonCollectionId.value) return
+  const imageId = contextMenu.value.imageId
+  closeContextMenu()
+  try {
+    await api.removeFaceMatch(catalogStore.activeCatalog.id, activePersonCollectionId.value, imageId)
+    libraryStore.removeImageIds([imageId])
+  } catch (e) {
+    console.error('removeFaceMatch failed:', e)
+  }
+}
 const showSettings = ref(false)
 const showCreateCollection = ref(false)
 const showDetail = ref(false)
@@ -720,13 +800,66 @@ async function fetchSmartViewStats() {
 // Per-image tags — fetched reactively when a single image is selected
 const selectedImageTags = ref<Array<{ name: string, confidence: number, source: string }>>([])
 
+// Per-image faces
+type FaceData = {
+  id: string
+  bbox_x: number
+  bbox_y: number
+  bbox_w: number
+  bbox_h: number
+  detection_score: number
+  person_collection_id: string | null
+  dismissed: boolean
+  person_name: string | null
+}
+const selectedImageFaces = ref<FaceData[]>([])
+const previewImgEl = ref<HTMLImageElement | null>(null)
+const previewDisplayWidth = ref(0)
+const previewDisplayHeight = ref(0)
+
+function measurePreview() {
+  const el = previewImgEl.value
+  if (el && el.offsetWidth > 0) {
+    previewDisplayWidth.value = el.offsetWidth
+    previewDisplayHeight.value = el.offsetHeight
+  }
+}
+
+function onPreviewLoad() {
+  // nextTick ensures layout has been calculated before we read offsetWidth
+  nextTick(measurePreview)
+}
+
+// Handle already-cached images: @load won't fire, but the ref will be set
+watch(previewImgEl, (el) => {
+  if (el?.complete) nextTick(measurePreview)
+})
+
+async function dismissFace(faceId: string) {
+  if (!catalogStore.activeCatalog) return
+  try {
+    await api.dismissFace(catalogStore.activeCatalog.id, faceId)
+    const face = selectedImageFaces.value.find(f => f.id === faceId)
+    if (face) face.dismissed = true
+  } catch (e) {
+    console.warn('Failed to dismiss face:', e)
+  }
+}
+
 watch(
   () => libraryStore.lastSelectedId,
   async (imageId) => {
     selectedImageTags.value = []
+    selectedImageFaces.value = []
+    previewDisplayWidth.value = 0
+    previewDisplayHeight.value = 0
     if (!imageId || !catalogStore.activeCatalog) return
     try {
       selectedImageTags.value = await api.getImageTags(catalogStore.activeCatalog.id, imageId)
+    } catch { /* non-critical */ }
+    try {
+      const result = await api.getImageFaces(catalogStore.activeCatalog.id, imageId)
+      selectedImageFaces.value = result.faces
     } catch { /* non-critical */ }
   }
 )

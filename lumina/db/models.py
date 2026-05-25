@@ -467,6 +467,12 @@ class Collection(Base):
         ForeignKey("collections.id", ondelete="CASCADE"),
         nullable=True,
     )
+    # True once the user has explicitly renamed this collection
+    user_renamed = Column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # Manual sort position within parent; NULL = auto-sort (by size)
+    sort_position = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
