@@ -359,16 +359,20 @@ def ignore_person_collection(
     collection_id: uuid.UUID,
     db: Session = Depends(get_db),
 ) -> dict:
-    """Dismiss all faces belonging to a person collection (or group of persons) and delete it.
+    """Remove a person cluster and return its faces to the unassigned pool.
 
-    Dismissed faces are excluded from future face-clustering runs, so the person
-    will not reappear automatically.  Works on both individual person sub-collections
-    and group collections (dismisses faces for every child in the group).
+    Deletes the collection and clears person_collection_id on all associated faces
+    so they are available for re-clustering on the next run.  Faces are NOT dismissed,
+    so they will reappear — this is intentional, since the cluster may contain faces
+    of people you care about that were incorrectly grouped together.
+
+    Works on both individual person sub-collections and group collections (unassigns
+    faces for every child in the group).
     """
     collection = _get_collection_or_404(db, catalog_id, collection_id)
 
     # Collect the collection ID plus all child IDs (handles both leaf and group)
-    ids_to_dismiss: List[str] = [str(collection_id)]
+    ids_to_clear: List[str] = [str(collection_id)]
     children = (
         db.query(Collection.id)
         .filter(
@@ -378,24 +382,24 @@ def ignore_person_collection(
         .all()
     )
     for (child_id,) in children:
-        ids_to_dismiss.append(str(child_id))
+        ids_to_clear.append(str(child_id))
 
-    # Dismiss every face that was assigned to any of these collections
+    # Unassign faces — keep dismissed=FALSE so they re-enter the clustering pool
     db.execute(
         text(
             """
             UPDATE faces
-            SET dismissed = TRUE, person_collection_id = NULL
+            SET person_collection_id = NULL
             WHERE person_collection_id = ANY(CAST(:ids AS uuid[]))
             """
         ),
-        {"ids": ids_to_dismiss},
+        {"ids": ids_to_clear},
     )
 
     # Delete the collection (CASCADE removes children)
     db.delete(collection)
     db.commit()
-    return {"status": "ignored", "faces_dismissed": len(ids_to_dismiss)}
+    return {"status": "removed", "faces_unassigned": len(ids_to_clear)}
 
 
 class MergeCollectionRequest(BaseModel):

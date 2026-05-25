@@ -39,6 +39,8 @@ TRAVEL_MIN_IMAGES_PER_DAY = (
     3  # min photos in a day to count as travel (filters glitches)
 )
 TRIP_MAX_GAP_DAYS = 5  # days without photos before a new trip segment starts
+TRIP_GEO_SPLIT_FLOOR_KM = 250  # minimum jump to ever force a split
+TRIP_GEO_SPLIT_FACTOR = 3  # split if jump > this × max recent daily movement
 TRIP_MIN_DAYS = 2  # trip must span at least this many calendar days
 TRIP_MIN_IMAGES = 5  # trip must have at least this many images
 HOME_BASE_CELL_MIN_FRACTION = (
@@ -252,15 +254,6 @@ def categorize_images_job(ctx: JobContext) -> Dict[str, Any]:
 
     results: Dict[str, Any] = {}
 
-    # --- Archival ---
-    if "archival" in sys_cols and not should_stop_job(ctx.job_id):
-        update_job_status(
-            ctx.job_id,
-            "PROGRESS",
-            progress={"percent": 10, "message": "Detecting archival photos"},
-        )
-        results["archival"] = _categorize_archival(catalog_id, sys_cols["archival"])
-
     # --- Travel ---
     if "travel" in sys_cols and not should_stop_job(ctx.job_id):
         update_job_status(
@@ -278,15 +271,6 @@ def categorize_images_job(ctx: JobContext) -> Dict[str, Any]:
             progress={"percent": 60, "message": "Detecting work content"},
         )
         results["work"] = _categorize_work(catalog_id, sys_cols["work_professional"])
-
-    # --- Family & Personal ---
-    if "family_personal" in sys_cols and not should_stop_job(ctx.job_id):
-        update_job_status(
-            ctx.job_id,
-            "PROGRESS",
-            progress={"percent": 80, "message": "Detecting personal moments"},
-        )
-        results["family"] = _categorize_family(catalog_id, sys_cols["family_personal"])
 
     if should_stop_job(ctx.job_id):
         return {"cancelled": True}
@@ -717,15 +701,45 @@ def _categorize_travel(catalog_id: str, travel_id: str) -> Dict[str, Any]:
             (img["id"], img["lat"], img["lon"])
         )
 
+    def _day_centroid(d: date) -> Optional[Tuple[float, float]]:
+        pts = [(lat, lon) for _, lat, lon in by_date.get(d, [])]
+        return _centroid(pts)
+
     sorted_days = sorted(by_date.keys())
     trips: List[List[date]] = []
     current: List[date] = [sorted_days[0]]
     for d in sorted_days[1:]:
-        if (d - current[-1]).days <= TRIP_MAX_GAP_DAYS:
-            current.append(d)
-        else:
+        # Always split on a long time gap.
+        if (d - current[-1]).days > TRIP_MAX_GAP_DAYS:
             trips.append(current)
             current = [d]
+            continue
+
+        # Detect a "flight" via velocity spike: if today's position jump is much
+        # larger than recent typical daily movement, it looks like air travel, not
+        # a continuation of the current trip.
+        prev_c = _day_centroid(current[-1])
+        curr_c = _day_centroid(d)
+        if prev_c and curr_c:
+            jump_km = _haversine_km(prev_c[0], prev_c[1], curr_c[0], curr_c[1])
+            # Average inter-day distance over the last 5 days of current segment
+            recent = current[-5:]
+            dists = []
+            for i in range(1, len(recent)):
+                c1, c2 = _day_centroid(recent[i - 1]), _day_centroid(recent[i])
+                if c1 and c2:
+                    dists.append(_haversine_km(c1[0], c1[1], c2[0], c2[1]))
+            avg_velocity = sum(dists) / len(dists) if dists else 0
+            # Floor ensures we still split stationary-base → city jumps
+            threshold = max(
+                TRIP_GEO_SPLIT_FLOOR_KM, avg_velocity * TRIP_GEO_SPLIT_FACTOR
+            )
+            if jump_km > threshold:
+                trips.append(current)
+                current = [d]
+                continue
+
+        current.append(d)
     trips.append(current)
 
     # Step 4: create a sub-collection per trip (skip micro-trips)

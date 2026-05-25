@@ -297,7 +297,7 @@
             @click="ignorePerson(contextMenu!.collection); closeContextMenu()"
             class="w-full px-3 py-1.5 text-left text-red-400 hover:bg-gray-700 hover:text-red-300 flex items-center gap-2"
           >
-            <XCircleIcon class="w-3.5 h-3.5" /> Ignore this person
+            <XCircleIcon class="w-3.5 h-3.5" /> Clear &amp; unassign faces
           </button>
         </template>
         <template v-if="availableGroups(contextMenu.collection).length > 0 || peopleParentOf(contextMenu.collection)">
