@@ -1,37 +1,42 @@
 # lumina
 
-Lumina is a personal photo organization tool that automatically categorizes images into collections based on location, time, and other metadata, helping users browse and manage their photo library more effectively.
+Lumina is a personal media organization platform that automatically categorizes photos and videos into travel trips, work documents, and personal groups using AI and geolocation data. It helps users review and manage their media collections by suggesting meaningful groupings and allowing manual confirmation or correction of these assignments.
 
-**Stack:** Python, FastAPI, React, PostgreSQL, Docker
+**Stack:** Python 3.12, FastAPI, PostgreSQL, React, Tailwind CSS, Docker
 
 ## Current Status
-- Travel collection algorithm has been improved to detect home bases and reduce micro-trips
-- Collections can now be manually reordered with renamed ones prioritized
-- Database schema updated to support user-renamed flags and manual sort positions
+- The categorize job now correctly segments travel trips based on both time gaps and geographic jumps
+- Family and archival decade sub-collections have been removed from the UI and database
+- The "Ignore this person" sidebar action now clears and unassigns faces instead of permanently dismissing them
+- Pending amber badges remain for all system-generated memberships, including travel trips
 
 ## Recent Decisions
-- 2026-05-24: Improved travel trip detection by adding home base logic, raising min images/day, and loosening trip gaps to reduce micro-trips from 284 to 73
-- 2026-05-24: Implemented manual collection reordering with renamed collections prioritized, and added user_renamed flag and sort_position fields to the database
+- 2026-05-25: Changed 'Ignore this person' behavior to unassign faces instead of permanently dismissing them, allowing for re-clustering
+- 2026-05-25: Removed decade-based sub-collections for Family & Personal and Archival categories
+- 2026-05-25: Implemented dynamic trip segmentation that splits geographically distant trips even when time gaps are small
 
 ## Open Issues
-- Flight GPS artifacts in 2012 mid-Atlantic regions still geocode to ocean areas
+- Pending badges still show for all system-generated memberships — consider auto-confirming travel and work trips
+- Trip geo split logic may need further tuning for edge cases like very short flights
 
 ## Key Files
-- `lumina/models/collection.py`: Defines the collection model including new user_renamed and sort_position fields
-- `lumina/api/collections.py`: API endpoints for collections including bulk reorder and auto-setting of user_renamed flag
-- `lumina/services/travel_detector.py`: Logic for detecting travel collections with updated home base detection
-- `lumina/store/collections.ts`: Frontend store logic for sorting collections by user_renamed flag and image count
-- `lumina/components/NavigationSidebar.tsx`: Sidebar component that supports manual reordering of collections with drag handles
-- `lumina/migrations/003_add_collection_sort_fields.py`: Database migration adding user_renamed and sort_position columns to collections
-- `lumina/services/image_processor.py`: Service responsible for processing images and triggering collection categorization
-- `lumina/api/auth.py`: Authentication middleware used for securing API endpoints
+- `/home/irjudson/Projects/lumina/backend/categorize.py`: Main logic for grouping images into travel trips and other categories
+- `/home/irjudson/Projects/lumina/backend/models.py`: Database models defining trips, memberships, and face clusters
+- `/home/irjudson/Projects/lumina/backend/api.py`: API endpoints for managing memberships, clusters, and categorization
+- `/home/irjudson/Projects/lumina/frontend/src/components/Sidebar.jsx`: Sidebar UI showing clusters and navigation items with pending counts
+- `/home/irjudson/Projects/lumina/frontend/src/components/NavItem.jsx`: Navigation item component displaying counts and pending indicators
+- `/home/irjudson/Projects/lumina/frontend/src/components/FaceCluster.jsx`: UI for displaying and managing face clusters in the sidebar
+- `/home/irjudson/Projects/lumina/frontend/src/components/TravelTrip.jsx`: UI for displaying auto-generated travel trips and their pending memberships
+- `/home/irjudson/Projects/lumina/backend/db_cleanup.py`: Script to remove stale decade sub-collections and clean up old trip data
 
 ## Recent Activity
-- 2026-05-24: Improved travel trip detection algorithm and re-ran categorization job
-- 2026-05-24: Implemented manual collection reordering with renamed collections prioritized
-- 2026-05-24: Updated database schema to support user-renamed flags and manual sort positions
-- 2026-05-24: Modified collection sorting logic in frontend store and sidebar component
-- 2026-05-24: Added bulk reorder endpoint and updated collection update logic in API
-- 2026-05-24: Added user_renamed flag and sort_position fields to collection model and migration
-- 2026-05-24: Re-ran categorize_images job with improved travel detection
-- 2026-05-24: Added home base detection logic to travel categorization
+- 2026-05-25: Implemented geographic trip splitting logic to prevent merging of distant locations
+- 2026-05-25: Removed decade-based sub-collections from Family & Archival categories
+- 2026-05-25: Updated sidebar action label from 'Ignore this person' to 'Clear & unassign faces'
+- 2026-05-25: Fixed trip segmentation to use dynamic geographic jump detection
+- 2026-05-25: Deployed changes to categorize job and frontend
+- 2026-05-25: Committed all backend and frontend fixes to version control
+- 2026-05-25: Updated database to remove stale family/archival sub-collections
+- 2026-05-25: Configured pending badge behavior for system-generated memberships
+- 2026-05-25: Ensured travel trips are segmented by both time and geographic distance
+- 2026-05-25: Re-ran categorize job to apply new trip segmentation logic
