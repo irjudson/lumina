@@ -78,6 +78,27 @@ def test_camera_import_delete_source(catalog_with_output, source_image, db_sessi
     camera_import_job(ctx)
 
     assert not source_image.exists()
+    copied_files = list(output_dir.rglob("*.jpg"))
+    assert len(copied_files) == 1
+
+
+def test_camera_import_missing_file(catalog_with_output, db_session):
+    catalog, output_dir = catalog_with_output
+
+    ctx = JobContext(
+        job_id=str(uuid.uuid4()),
+        catalog_id=str(catalog.id),
+        parameters={
+            "file_paths": ["/nonexistent/IMG_999.jpg"],
+            "delete_source": False,
+        },
+    )
+
+    result = camera_import_job(ctx)
+
+    assert result["failed"] == 1
+    assert result["copied"] == 0
+    assert result["cataloged"] == 0
 
 
 def test_camera_import_no_organized_directory(db_session, tmp_path):

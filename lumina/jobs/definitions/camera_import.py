@@ -16,10 +16,9 @@ logger = logging.getLogger(__name__)
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".m4v", ".wmv", ".webm"}
 
 
-def _get_capture_time(source_path: Path):
+def _get_capture_time(source_path: Path, extractor=None):
     """Return EXIF capture time or mtime fallback."""
     try:
-        from lumina.analysis.metadata import MetadataExtractor
         from lumina.core.types import FileType
 
         ft = (
@@ -27,11 +26,19 @@ def _get_capture_time(source_path: Path):
             if source_path.suffix.lower() in VIDEO_SUFFIXES
             else FileType.IMAGE
         )
-        with MetadataExtractor() as extractor:
+        if extractor is not None:
             meta = extractor.extract_metadata(source_path, ft)
             dates = extractor.extract_dates(source_path, meta)
             if dates and dates.capture_time:
                 return dates.capture_time
+        else:
+            from lumina.analysis.metadata import MetadataExtractor
+
+            with MetadataExtractor() as ext:
+                meta = ext.extract_metadata(source_path, ft)
+                dates = ext.extract_dates(source_path, meta)
+                if dates and dates.capture_time:
+                    return dates.capture_time
     except Exception:
         pass
     return datetime.fromtimestamp(source_path.stat().st_mtime)
@@ -71,6 +78,13 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
             return {"error": "no_organized_directory"}
         output_dir = Path(catalog.organized_directory)
 
+    # Validate output directory — create if missing, fail fast if inaccessible
+    if not output_dir.exists():
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return {"error": "output_directory_not_accessible", "detail": str(e)}
+
     total = len(file_paths)
     copied = cataloged = failed = skipped = 0
 
@@ -100,20 +114,24 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 continue
 
             try:
-                capture_time = _get_capture_time(source)
+                capture_time = _get_capture_time(source, extractor)
                 dest = _dest_path(output_dir, source, capture_time)
                 dest.parent.mkdir(parents=True, exist_ok=True)
 
                 shutil.copy2(str(source), str(dest))
                 copied += 1
 
+                this_cataloged = False
                 result = _process_file_sequential(dest, extractor)
                 if result is not None:
                     image_record, _ = result
                     catalog_db.add_image(image_record)
                     cataloged += 1
+                    this_cataloged = True
+                else:
+                    skipped += 1
 
-                if delete_source and dest.exists():
+                if delete_source and this_cataloged:
                     source.unlink()
 
             except Exception as e:
