@@ -82,6 +82,7 @@ export const useCameraImportStore = defineStore('cameraImport', () => {
     currentJob.value = null
     discoverError.value = null
     selectedDevice.value = null
+    deleteSource.value = false
   }
 
   return {

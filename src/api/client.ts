@@ -238,7 +238,7 @@ export interface DiscoveredFile {
   filename: string
   size_bytes: number
   taken_at: string | null
-  thumbnail_data_url: string
+  thumbnail_data_url: string | null
 }
 
 // --- Map Interfaces ---
