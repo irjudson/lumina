@@ -224,6 +224,23 @@ export interface EventImage {
   photo_date?: string | null
 }
 
+// --- Camera Interfaces ---
+
+export interface CameraDevice {
+  name: string
+  path: string
+  dcim_path: string
+  file_count_estimate: number
+}
+
+export interface DiscoveredFile {
+  path: string
+  filename: string
+  size_bytes: number
+  taken_at: string | null
+  thumbnail_data_url: string
+}
+
 // --- Map Interfaces ---
 
 export interface MapCluster {
@@ -404,6 +421,18 @@ class ApiClient {
 
   async cancelJob(jobId: string): Promise<void> {
     await this.client.delete(`/jobs/${jobId}`)
+  }
+
+  async getCameraDevices(catalogId: string): Promise<CameraDevice[]> {
+    const response = await this.client.get(`/catalogs/${catalogId}/camera/devices`)
+    return response.data
+  }
+
+  async discoverCameraFiles(catalogId: string, devicePath: string): Promise<DiscoveredFile[]> {
+    const response = await this.client.post(`/catalogs/${catalogId}/camera/discover`, {
+      device_path: devicePath
+    })
+    return response.data
   }
 
   async previewOrganize(
