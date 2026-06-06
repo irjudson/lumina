@@ -4344,3 +4344,76 @@ def dismiss_face(
     db.commit()
 
     return {"status": "dismissed", "face_id": str(face_id)}
+
+
+# ─── Camera import ────────────────────────────────────────────────────────────
+
+DEVICE_MOUNT_ROOTS = [
+    Path("/media"),
+    Path("/run/media"),
+    Path("/mnt"),
+    Path("/Volumes"),  # macOS
+]
+
+MEDIA_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".heic",
+    ".heif",
+    ".webp",
+    ".tiff",
+    ".tif",
+    ".raw",
+    ".cr2",
+    ".cr3",
+    ".nef",
+    ".arw",
+    ".dng",
+    ".orf",
+    ".rw2",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".mkv",
+    ".m4v",
+}
+
+
+class DeviceInfo(BaseModel):
+    name: str
+    path: str
+    dcim_path: str
+    file_count_estimate: int
+
+
+@router.get("/{catalog_id}/camera/devices", response_model=List[DeviceInfo])
+def list_camera_devices(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
+    """Return detected cameras/SD cards mounted on the system."""
+    devices = []
+    for mount_root in DEVICE_MOUNT_ROOTS:
+        if not mount_root.exists():
+            continue
+        try:
+            for device_dir in mount_root.iterdir():
+                if not device_dir.is_dir():
+                    continue
+                dcim = device_dir / "DCIM"
+                if not (dcim.exists() and dcim.is_dir()):
+                    continue
+                count = sum(
+                    1
+                    for f in dcim.rglob("*")
+                    if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS
+                )
+                devices.append(
+                    DeviceInfo(
+                        name=device_dir.name,
+                        path=str(device_dir),
+                        dcim_path=str(dcim),
+                        file_count_estimate=count,
+                    )
+                )
+        except PermissionError:
+            continue
+    return devices
