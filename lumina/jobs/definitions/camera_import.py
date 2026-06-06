@@ -87,6 +87,7 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
 
     total = len(file_paths)
     copied = cataloged = failed = skipped = 0
+    imported_image_ids: list[str] = []
 
     update_job_status(
         ctx.job_id,
@@ -126,6 +127,7 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 if result is not None:
                     image_record, _ = result
                     catalog_db.add_image(image_record)
+                    imported_image_ids.append(image_record.id)
                     cataloged += 1
                     this_cataloged = True
                 else:
@@ -151,6 +153,9 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 },
             )
 
+    if imported_image_ids:
+        _upsert_last_import_collection(ctx.catalog_id, imported_image_ids)
+
     return {
         "copied": copied,
         "cataloged": cataloged,
@@ -158,3 +163,61 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
         "skipped": skipped,
         "total": total,
     }
+
+
+def _upsert_last_import_collection(catalog_id: str, image_ids: list[str]) -> None:
+    """Replace the 'last_import' system collection with the just-imported images."""
+    import uuid as _uuid
+    from datetime import datetime
+
+    from sqlalchemy import text as sa_text
+
+    now = datetime.utcnow().isoformat()
+    with get_db_context() as db:
+        row = db.execute(
+            sa_text(
+                "SELECT id FROM collections WHERE catalog_id = CAST(:cid AS uuid)"
+                " AND system_key = 'last_import' LIMIT 1"
+            ),
+            {"cid": catalog_id},
+        ).first()
+
+        if row:
+            collection_id = str(row[0])
+            db.execute(
+                sa_text(
+                    "UPDATE collections SET name = :name, updated_at = :now WHERE id = CAST(:id AS uuid)"
+                ),
+                {"name": "Last Import", "now": now, "id": collection_id},
+            )
+        else:
+            collection_id = str(_uuid.uuid4())
+            db.execute(
+                sa_text(
+                    "INSERT INTO collections (id, catalog_id, name, source, system_key, created_at, updated_at)"
+                    " VALUES (CAST(:id AS uuid), CAST(:cid AS uuid), :name, 'system', 'last_import', :now, :now)"
+                ),
+                {
+                    "id": collection_id,
+                    "cid": catalog_id,
+                    "name": "Last Import",
+                    "now": now,
+                },
+            )
+
+        db.execute(
+            sa_text(
+                "DELETE FROM collection_images WHERE collection_id = CAST(:cid AS uuid)"
+            ),
+            {"cid": collection_id},
+        )
+
+        for image_id in image_ids:
+            db.execute(
+                sa_text(
+                    "INSERT INTO collection_images (collection_id, image_id)"
+                    " VALUES (CAST(:cid AS uuid), :iid)"
+                    " ON CONFLICT DO NOTHING"
+                ),
+                {"cid": collection_id, "iid": image_id},
+            )

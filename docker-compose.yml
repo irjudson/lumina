@@ -15,6 +15,20 @@ services:
       # Mount host directories to access user files
       - /home:/host/home:ro
       - /mnt/synology:/host/synology
+      # Camera/SD card mounts with shared propagation so devices plugged in after
+      # container start are visible inside the container
+      - type: bind
+        source: /media
+        target: /host/media
+        read_only: true
+        bind:
+          propagation: shared
+      - type: bind
+        source: /run/media
+        target: /host/run/media
+        read_only: true
+        bind:
+          propagation: shared
       # Development: mount source code for live reload
       - ./lumina:/app/lumina
       # Mount MPS directories for GPU sharing

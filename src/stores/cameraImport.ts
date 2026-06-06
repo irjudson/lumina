@@ -34,16 +34,26 @@ export const useCameraImportStore = defineStore('cameraImport', () => {
     }
   }
 
+  let _discoverAbort: AbortController | null = null
+
   async function discoverFiles(devicePath: string) {
     if (!catalogStore.activeCatalog) return
+    _discoverAbort?.abort()
+    _discoverAbort = new AbortController()
     isDiscovering.value = true
     discoverError.value = null
     discoveredFiles.value = []
     try {
-      const files = await api.discoverCameraFiles(catalogStore.activeCatalog.id, devicePath)
-      discoveredFiles.value = files.map(f => ({ ...f, selected: true }))
+      await api.discoverCameraFilesStream(
+        catalogStore.activeCatalog.id,
+        devicePath,
+        (file) => { discoveredFiles.value.push({ ...file, selected: true }) },
+        _discoverAbort.signal,
+      )
     } catch (e: any) {
-      discoverError.value = e?.response?.data?.detail ?? 'Discovery failed'
+      if (e?.name !== 'AbortError') {
+        discoverError.value = e?.message ?? 'Discovery failed'
+      }
     } finally {
       isDiscovering.value = false
     }

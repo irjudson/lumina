@@ -4355,6 +4355,8 @@ def dismiss_face(
 # ─── Camera import ────────────────────────────────────────────────────────────
 
 DEVICE_MOUNT_ROOTS = [
+    Path("/host/media"),  # host /media (cameras, SD cards on Linux)
+    Path("/host/run/media"),  # host /run/media (udisks auto-mount on Linux)
     Path("/media"),
     Path("/run/media"),
     Path("/mnt"),
@@ -4413,9 +4415,19 @@ def list_camera_devices(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
         if not mount_root.exists():
             continue
         try:
-            for device_dir in mount_root.iterdir():
-                if not device_dir.is_dir():
+            # Check both one and two levels deep to handle:
+            # - /media/DEVICE/DCIM  (direct mount)
+            # - /media/USERNAME/DEVICE/DCIM  (udisks on Linux)
+            candidates = []
+            for entry in mount_root.iterdir():
+                if not entry.is_dir():
                     continue
+                candidates.append(entry)
+                for sub in entry.iterdir():
+                    if sub.is_dir():
+                        candidates.append(sub)
+
+            for device_dir in candidates:
                 dcim = device_dir / "DCIM"
                 if not (dcim.exists() and dcim.is_dir()):
                     continue
@@ -4437,17 +4449,18 @@ def list_camera_devices(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
     return devices
 
 
-@router.post("/{catalog_id}/camera/discover", response_model=List[DiscoveredFile])
+@router.post("/{catalog_id}/camera/discover")
 def discover_camera_files(
     catalog_id: uuid.UUID,
     body: DiscoverRequest,
     db: Session = Depends(get_db),
 ):
-    """Return new media files in device_path not yet in this catalog."""
+    """Stream new media files in device_path not yet in this catalog (NDJSON)."""
     import base64
-    import hashlib
     import io as _io
+    import json
 
+    from fastapi.responses import StreamingResponse
     from PIL import Image as PILImage
     from sqlalchemy import text as sa_text
 
@@ -4464,107 +4477,148 @@ def discover_camera_files(
     if not device_path.exists():
         raise HTTPException(status_code=404, detail="Device path not found")
 
-    candidates = [
-        f
-        for f in device_path.rglob("*")
-        if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS
-    ]
+    candidates = sorted(
+        (
+            f
+            for f in device_path.rglob("*")
+            if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS
+        ),
+        key=lambda f: f.name,
+    )
+    cid_str = str(catalog_id)
 
-    already_imported = set()
-    # Phase 1: fast path — filename match
-    # Use '!' as ESCAPE char to avoid backslash complexity with PostgreSQL
-    for candidate in candidates:
-        escaped = (
-            candidate.name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-        )
-        row = db.execute(
-            sa_text(
-                "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                " AND source_path LIKE :pat ESCAPE '!' LIMIT 1"
-            ),
-            {"cid": str(catalog_id), "pat": f"%/{escaped}"},
-        ).first()
-        if row:
-            already_imported.add(str(candidate))
-
-    # Phase 2: checksum check for unknowns
-    unknowns = [c for c in candidates if str(c) not in already_imported]
-    for candidate in unknowns:
+    def _thumbnail(f: Path) -> str:
         try:
-            h = hashlib.sha256()
-            with open(candidate, "rb") as fh:
-                for chunk in iter(lambda: fh.read(8192), b""):
-                    h.update(chunk)
-            checksum = h.hexdigest()
-            row = db.execute(
+            with PILImage.open(str(f)) as img:
+                img.thumbnail((200, 200))
+                buf = _io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=60)
+                return (
+                    "data:image/jpeg;base64,"
+                    + base64.b64encode(buf.getvalue()).decode()
+                )
+        except Exception:
+            pass
+        try:
+            import rawpy
+
+            with rawpy.imread(str(f)) as raw:
+                t = raw.extract_thumb()
+            if t.format == rawpy.ThumbFormat.JPEG:
+                jpeg_bytes = t.data
+            else:
+                buf2 = _io.BytesIO()
+                PILImage.fromarray(t.data).save(buf2, format="JPEG", quality=60)
+                jpeg_bytes = buf2.getvalue()
+            with PILImage.open(_io.BytesIO(jpeg_bytes)) as img:
+                img.thumbnail((200, 200))
+                buf = _io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=60)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception:
+            return ""
+
+    organized_dir = Path(catalog.organized_directory)
+
+    def _check_already_imported(f: Path, capture_time, stream_db) -> bool:
+        """No file reads — check predicted organized_path then filename+size."""
+        # Primary: predicted destination path (exact match, fast)
+        if capture_time is not None:
+            from lumina.jobs.definitions.organize import _make_date_dir, _make_filename
+
+            predicted = str(
+                organized_dir
+                / _make_date_dir(capture_time)
+                / _make_filename(capture_time, f.suffix.lower())
+            )
+            row = stream_db.execute(
                 sa_text(
-                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                    " AND checksum = :cs LIMIT 1"
+                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid) AND organized_path = :p LIMIT 1"
                 ),
-                {"cid": str(catalog_id), "cs": checksum},
+                {"cid": cid_str, "p": predicted},
             ).first()
             if row:
-                already_imported.add(str(candidate))
-        except Exception as e:
-            logger.debug(f"Could not checksum {candidate}: {e}")
+                return True
+        # Fallback: filename + size (catches files imported before organize)
+        escaped = f.name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        row = stream_db.execute(
+            sa_text(
+                "SELECT size_bytes FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                " AND source_path LIKE :pat ESCAPE '!' LIMIT 1"
+            ),
+            {"cid": cid_str, "pat": f"%/{escaped}"},
+        ).first()
+        return bool(row and row[0] == f.stat().st_size)
 
-    new_files = [c for c in candidates if str(c) not in already_imported]
-
-    results = []
-
-    try:
+    def _process_one(f: Path):
+        """Per-file work in thread: read EXIF date, dedup check, thumbnail. Returns JSON line or None."""
         from lumina.analysis.metadata import MetadataExtractor
         from lumina.core.types import FileType
+        from lumina.db import get_db_context
 
-        _extractor_cm = MetadataExtractor()
-        _extractor = _extractor_cm.__enter__()
-    except Exception:
-        _extractor_cm = None
-        _extractor = None
-
-    try:
-        for f in new_files:
-            try:
-                with PILImage.open(str(f)) as img:
-                    img.thumbnail((200, 200))
-                    buf = _io.BytesIO()
-                    img.convert("RGB").save(buf, format="JPEG", quality=60)
-                    thumb = (
-                        "data:image/jpeg;base64,"
-                        + base64.b64encode(buf.getvalue()).decode()
-                    )
-            except Exception:
-                thumb = ""
-
-            taken_at = None
-            if _extractor is not None:
-                try:
-                    ft = (
-                        FileType.VIDEO
-                        if f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
-                        else FileType.IMAGE
-                    )
-                    meta = _extractor.extract_metadata(f, ft)
-                    dates = _extractor.extract_dates(f, meta)
-                    if dates and dates.capture_time:
-                        taken_at = dates.capture_time.isoformat()
-                except Exception:
-                    pass
-
-            results.append(
-                DiscoveredFile(
-                    path=str(f),
-                    filename=f.name,
-                    size_bytes=f.stat().st_size,
-                    taken_at=taken_at,
-                    thumbnail_data_url=thumb,
+        capture_time = None
+        taken_at = None
+        try:
+            with MetadataExtractor() as ext:
+                ft = (
+                    FileType.VIDEO
+                    if f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+                    else FileType.IMAGE
                 )
-            )
-    finally:
-        if _extractor_cm is not None:
-            try:
-                _extractor_cm.__exit__(None, None, None)
-            except Exception:
-                pass
+                meta = ext.extract_metadata(f, ft)
+                dates = ext.extract_dates(f, meta)
+                if dates and dates.capture_time:
+                    capture_time = dates.capture_time
+                    taken_at = capture_time.isoformat()
+        except Exception:
+            pass
 
-    return results
+        with get_db_context() as db:
+            if _check_already_imported(f, capture_time, db):
+                return None
+
+        return (
+            json.dumps(
+                {
+                    "path": str(f),
+                    "filename": f.name,
+                    "size_bytes": f.stat().st_size,
+                    "taken_at": taken_at,
+                    "thumbnail_data_url": _thumbnail(f),
+                }
+            )
+            + "\n"
+        )
+
+    def generate():
+        import queue
+        from concurrent.futures import ThreadPoolExecutor
+
+        WORKERS = 4
+        result_queue: queue.Queue = queue.Queue()
+
+        def worker(f: Path):
+            try:
+                line = _process_one(f)
+                if line is not None:
+                    result_queue.put(line)
+            except Exception as e:
+                logger.debug(f"Failed to process {f}: {e}")
+            finally:
+                result_queue.put(None)  # sentinel per file
+
+        total = len(candidates)
+        if total == 0:
+            return
+
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for f in candidates:
+                pool.submit(worker, f)
+            finished = 0
+            while finished < total:
+                item = result_queue.get(timeout=120)
+                finished += item is None
+                if item is not None:
+                    yield item
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")

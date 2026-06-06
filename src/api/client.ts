@@ -428,11 +428,37 @@ class ApiClient {
     return response.data
   }
 
-  async discoverCameraFiles(catalogId: string, devicePath: string): Promise<DiscoveredFile[]> {
-    const response = await this.client.post(`/catalogs/${catalogId}/camera/discover`, {
-      device_path: devicePath
+  async discoverCameraFilesStream(
+    catalogId: string,
+    devicePath: string,
+    onFile: (file: DiscoveredFile) => void,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const baseURL = (this.client.defaults.baseURL ?? '/api').replace(/\/$/, '')
+    const response = await fetch(`${baseURL}/catalogs/${catalogId}/camera/discover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_path: devicePath }),
+      signal,
     })
-    return response.data
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}))
+      throw new Error(detail?.detail ?? `Discover failed: ${response.status}`)
+    }
+    const reader = response.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()!
+      for (const line of lines) {
+        if (line.trim()) onFile(JSON.parse(line))
+      }
+    }
+    if (buffer.trim()) onFile(JSON.parse(buffer))
   }
 
   async previewOrganize(

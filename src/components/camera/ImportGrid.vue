@@ -1,20 +1,29 @@
 <template>
   <div class="flex flex-col h-full">
-    <div class="flex items-center gap-3 px-4 py-3 border-b border-gray-800 shrink-0">
-      <button @click="store.selectAll()" class="text-xs text-blue-400 hover:text-blue-300">Select All</button>
+    <div class="flex items-center gap-2 px-4 py-2 border-b border-gray-800 shrink-0">
+      <button @click="store.selectAll()" class="text-xs text-blue-400 hover:text-blue-300 whitespace-nowrap">All</button>
       <span class="text-gray-700">|</span>
-      <button @click="store.deselectAll()" class="text-xs text-blue-400 hover:text-blue-300">None</button>
-      <span class="text-xs text-gray-500 ml-auto">
-        {{ store.selectedFiles.length }} / {{ store.discoveredFiles.length }} selected
+      <button @click="store.deselectAll()" class="text-xs text-blue-400 hover:text-blue-300 whitespace-nowrap">None</button>
+      <span class="text-xs text-gray-600 mx-1">·</span>
+      <span class="text-xs text-gray-500 whitespace-nowrap">
+        {{ store.selectedFiles.length }} / {{ store.discoveredFiles.length }}
       </span>
+      <span v-if="store.isDiscovering" class="text-xs text-gray-500 italic">scanning…</span>
       <button
-        v-if="store.selectedDevice"
+        v-if="store.selectedDevice && !store.isDiscovering"
         @click="store.discoverFiles(store.selectedDevice!.dcim_path)"
-        :disabled="store.isDiscovering"
-        class="flex items-center gap-1.5 px-3 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded text-xs disabled:opacity-50"
+        class="flex items-center gap-1 px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 rounded text-xs"
+        title="Refresh"
       >
-        <RefreshCwIcon class="w-3 h-3" :class="store.isDiscovering ? 'animate-spin' : ''" />
-        Refresh
+        <RefreshCwIcon class="w-3 h-3" />
+      </button>
+      <button
+        v-if="store.discoveredFiles.length > 0"
+        @click="emit('import')"
+        :disabled="store.selectedFiles.length === 0"
+        class="ml-auto px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium rounded disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+      >
+        Import {{ store.selectedFiles.length > 0 ? store.selectedFiles.length : '' }} Photo{{ store.selectedFiles.length !== 1 ? 's' : '' }}
       </button>
     </div>
 
@@ -24,7 +33,7 @@
         <p class="text-sm text-gray-400">Select a device from the left panel</p>
       </div>
 
-      <div v-else-if="store.isDiscovering" class="flex flex-col items-center justify-center h-full">
+      <div v-else-if="store.isDiscovering && store.discoveredFiles.length === 0" class="flex flex-col items-center justify-center h-full">
         <LoaderIcon class="w-8 h-8 text-blue-500 animate-spin mb-3" />
         <p class="text-sm text-gray-400">Scanning for new photos...</p>
       </div>
@@ -56,5 +65,6 @@ import { CameraIcon, LoaderIcon, AlertCircleIcon, CheckCircleIcon, RefreshCwIcon
 import { useCameraImportStore } from '@/stores/cameraImport'
 import ImportCard from './ImportCard.vue'
 
+const emit = defineEmits<{ import: [] }>()
 const store = useCameraImportStore()
 </script>
