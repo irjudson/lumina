@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from math import cos, radians
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -4387,6 +4387,18 @@ class DeviceInfo(BaseModel):
     file_count_estimate: int
 
 
+class DiscoverRequest(BaseModel):
+    device_path: str
+
+
+class DiscoveredFile(BaseModel):
+    path: str
+    filename: str
+    size_bytes: int
+    taken_at: Optional[str]
+    thumbnail_data_url: str
+
+
 @router.get("/{catalog_id}/camera/devices", response_model=List[DeviceInfo])
 def list_camera_devices(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
     """Return detected cameras/SD cards mounted on the system."""
@@ -4417,3 +4429,117 @@ def list_camera_devices(catalog_id: uuid.UUID, db: Session = Depends(get_db)):
         except PermissionError:
             continue
     return devices
+
+
+@router.post("/{catalog_id}/camera/discover", response_model=List[DiscoveredFile])
+def discover_camera_files(
+    catalog_id: uuid.UUID,
+    body: DiscoverRequest,
+    db: Session = Depends(get_db),
+):
+    """Return new media files in device_path not yet in this catalog."""
+    import base64
+    import hashlib
+    import io as _io
+
+    from PIL import Image as PILImage
+    from sqlalchemy import text as sa_text
+
+    catalog = db.query(Catalog).filter(Catalog.id == str(catalog_id)).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+    if not catalog.organized_directory:
+        raise HTTPException(
+            status_code=400,
+            detail="No destination directory configured — set one in Catalog Settings",
+        )
+
+    device_path = Path(body.device_path)
+    if not device_path.exists():
+        raise HTTPException(status_code=404, detail="Device path not found")
+
+    candidates = [
+        f
+        for f in device_path.rglob("*")
+        if f.is_file() and f.suffix.lower() in MEDIA_EXTENSIONS
+    ]
+
+    already_imported = set()
+    # Phase 1: fast path — filename match
+    for candidate in candidates:
+        row = db.execute(
+            sa_text(
+                "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                " AND source_path LIKE :pat LIMIT 1"
+            ),
+            {"cid": str(catalog_id), "pat": f"%/{candidate.name}"},
+        ).first()
+        if row:
+            already_imported.add(str(candidate))
+
+    # Phase 2: checksum check for unknowns
+    unknowns = [c for c in candidates if str(c) not in already_imported]
+    for candidate in unknowns:
+        try:
+            h = hashlib.sha256()
+            with open(candidate, "rb") as fh:
+                for chunk in iter(lambda: fh.read(8192), b""):
+                    h.update(chunk)
+            checksum = h.hexdigest()
+            row = db.execute(
+                sa_text(
+                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                    " AND checksum = :cs LIMIT 1"
+                ),
+                {"cid": str(catalog_id), "cs": checksum},
+            ).first()
+            if row:
+                already_imported.add(str(candidate))
+        except Exception:
+            pass
+
+    new_files = [c for c in candidates if str(c) not in already_imported]
+
+    results = []
+    for f in new_files:
+        try:
+            with PILImage.open(str(f)) as img:
+                img.thumbnail((200, 200))
+                buf = _io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=60)
+                thumb = (
+                    "data:image/jpeg;base64,"
+                    + base64.b64encode(buf.getvalue()).decode()
+                )
+        except Exception:
+            thumb = ""
+
+        taken_at = None
+        try:
+            from lumina.analysis.metadata import MetadataExtractor
+            from lumina.core.types import FileType
+
+            ft = (
+                FileType.VIDEO
+                if f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+                else FileType.IMAGE
+            )
+            with MetadataExtractor() as extractor:
+                meta = extractor.extract_metadata(f, ft)
+                dates = extractor.extract_dates(f, meta)
+                if dates and dates.capture_time:
+                    taken_at = dates.capture_time.isoformat()
+        except Exception:
+            pass
+
+        results.append(
+            DiscoveredFile(
+                path=str(f),
+                filename=f.name,
+                size_bytes=f.stat().st_size,
+                taken_at=taken_at,
+                thumbnail_data_url=thumb,
+            )
+        )
+
+    return results
