@@ -215,9 +215,14 @@ def _upsert_last_import_collection(catalog_id: str, image_ids: list[str]) -> Non
         for image_id in image_ids:
             db.execute(
                 sa_text(
-                    "INSERT INTO collection_images (collection_id, image_id)"
-                    " VALUES (CAST(:cid AS uuid), :iid)"
+                    "INSERT INTO collection_images (id, collection_id, image_id, added_at, position)"
+                    " VALUES (CAST(:id AS uuid), CAST(:cid AS uuid), :iid, :now, 0)"
                     " ON CONFLICT DO NOTHING"
                 ),
-                {"cid": collection_id, "iid": image_id},
+                {
+                    "id": str(_uuid.uuid4()),
+                    "cid": collection_id,
+                    "iid": image_id,
+                    "now": now,
+                },
             )
