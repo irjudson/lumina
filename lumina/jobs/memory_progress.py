@@ -184,14 +184,13 @@ def cleanup_old_in_memory(max_age_hours: int = 24) -> int:
         cleaned_count = 0
 
         with get_progress_lock("cleanup"):
-            jobs_to_remove = []
             for job_id, job_data in list(_progress_storage.items()):
                 if job_id == "cleanup":
                     continue
                 created_at = datetime.fromisoformat(job_data.get("created_at", ""))
                 if created_at and created_at < cutoff_time:
-                    jobs_to_remove.append(job_id)
                     del _progress_storage[job_id]
+                    _progress_locks.pop(job_id, None)
                     cleaned_count += 1
 
             logger.info(f"Cleaned up {cleaned_count} old jobs from memory")

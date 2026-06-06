@@ -67,12 +67,28 @@ class WarehouseScheduler:
     def _run_loop(self) -> None:
         """Main scheduler loop - checks for tasks periodically."""
         logger.info("Warehouse scheduler loop started")
+        _cleanup_interval = 3600 // self.check_interval_seconds  # every ~1 hour
+        _loop_count = 0
 
         while self._running and not self._stop_event.is_set():
             try:
                 self._check_all_catalogs()
             except Exception as e:
                 logger.error(f"Error in warehouse scheduler loop: {e}", exc_info=True)
+
+            _loop_count += 1
+            if _loop_count >= _cleanup_interval:
+                _loop_count = 0
+                try:
+                    from .memory_progress import cleanup_old_in_memory
+
+                    cleaned = cleanup_old_in_memory(max_age_hours=2)
+                    if cleaned:
+                        logger.debug(
+                            f"Progress cleanup: removed {cleaned} stale entries"
+                        )
+                except Exception as e:
+                    logger.warning(f"Progress cleanup failed: {e}")
 
             # Wait for next interval (with interrupt support)
             self._stop_event.wait(self.check_interval_seconds)

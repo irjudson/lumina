@@ -346,6 +346,7 @@ _MONTHS = [
     "Dec",
 ]
 
+_GEOCODE_CACHE_MAXSIZE = 50_000
 _geocode_cache: Dict[str, Optional[str]] = {}
 
 _US_STATE_ABBR: Dict[str, str] = {
@@ -525,6 +526,11 @@ def _reverse_geocode_city(lat: float, lon: float) -> Optional[str]:
     key = f"{lat:.2f},{lon:.2f}"
     if key in _geocode_cache:
         return _geocode_cache[key]
+
+    if len(_geocode_cache) >= _GEOCODE_CACHE_MAXSIZE:
+        # Evict oldest ~10% to avoid O(n) cost on every insert near the limit
+        for old_key in list(_geocode_cache.keys())[: _GEOCODE_CACHE_MAXSIZE // 10]:
+            del _geocode_cache[old_key]
 
     nom_url = (
         f"https://nominatim.openstreetmap.org/reverse"

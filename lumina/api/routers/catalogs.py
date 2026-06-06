@@ -1193,6 +1193,7 @@ def get_image_thumbnail(
         )
 
     # Image has transforms - generate transformed thumbnail on-the-fly
+    img = None
     try:
         thumb_size = THUMBNAIL_SIZES[size]
 
@@ -1221,10 +1222,12 @@ def get_image_thumbnail(
         # Now create thumbnail (thumb_size is already a tuple)
         img.thumbnail(thumb_size, Image.Resampling.LANCZOS)
 
-        # Save to buffer
+        # Save to buffer then close image before returning
         buffer = io.BytesIO()
         img.save(buffer, format="JPEG", quality=quality)
         buffer.seek(0)
+        img.close()
+        img = None
 
         return StreamingResponse(
             buffer,
@@ -1238,6 +1241,9 @@ def get_image_thumbnail(
         raise HTTPException(
             status_code=500, detail="Failed to generate transformed thumbnail"
         )
+    finally:
+        if img is not None:
+            img.close()
 
 
 # =============================================================================
