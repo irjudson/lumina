@@ -15,15 +15,22 @@
 
     <div class="pt-4 border-t border-gray-800">
       <h4 class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3">Options</h4>
-      <label class="flex items-start gap-2 cursor-pointer">
+      <label
+        class="flex items-start gap-2 cursor-pointer p-2 rounded-md transition-colors"
+        :class="store.deleteSource ? 'bg-red-950/40 border border-red-800/40' : ''"
+      >
         <input
           type="checkbox"
           v-model="store.deleteSource"
           class="mt-0.5 rounded border-gray-700 bg-gray-800 text-red-600"
         />
         <div>
-          <div class="text-xs text-gray-300">Delete from device after import</div>
-          <div class="text-xs text-gray-500 mt-0.5">Frees space on camera/card</div>
+          <div class="text-xs font-medium" :class="store.deleteSource ? 'text-red-400' : 'text-gray-300'">
+            Delete from device after import
+          </div>
+          <div class="text-xs mt-0.5" :class="store.deleteSource ? 'text-red-500' : 'text-gray-500'">
+            {{ store.deleteSource ? 'Files will be permanently deleted from the device' : 'Frees space on camera/card' }}
+          </div>
         </div>
       </label>
     </div>
