@@ -13,6 +13,7 @@ from .definitions import (  # noqa: F401  - registers detect_duplicates_v2 job
 )
 from .definitions.archive_source import archive_source_job
 from .definitions.backup_catalog import backup_catalog_job
+from .definitions.camera_import import camera_import_job
 from .types import JobContext
 
 logger = logging.getLogger(__name__)
@@ -2242,4 +2243,5 @@ JOB_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "cluster_faces": cluster_faces_job,
     "archive_source": archive_source_job,
     "backup_catalog": backup_catalog_job,
+    "camera_import": camera_import_job,
 }

@@ -1,42 +1,31 @@
 # lumina
 
-Lumina is a personal media organization platform that automatically categorizes photos and videos into travel trips, work documents, and personal groups using AI and geolocation data. It helps users review and manage their media collections by suggesting meaningful groupings and allowing manual confirmation or correction of these assignments.
+Lumina is a web-based photo management application that allows users to organize, search, and view their photos. This project implements camera import functionality which enables importing photos from connected cameras via DCIM directories.
 
-**Stack:** Python 3.12, FastAPI, PostgreSQL, React, Tailwind CSS, Docker
+**Stack:** Vue.js 3 (Composition API), TypeScript, Pinia, Express.js, PostgreSQL
 
 ## Current Status
-- The categorize job now correctly segments travel trips based on both time gaps and geographic jumps
-- Family and archival decade sub-collections have been removed from the UI and database
-- The "Ignore this person" sidebar action now clears and unassigns faces instead of permanently dismissing them
-- Pending amber badges remain for all system-generated memberships, including travel trips
+- Camera import feature is being implemented as per design document
 
 ## Recent Decisions
-- 2026-05-25: Changed 'Ignore this person' behavior to unassign faces instead of permanently dismissing them, allowing for re-clustering
-- 2026-05-25: Removed decade-based sub-collections for Family & Personal and Archival categories
-- 2026-05-25: Implemented dynamic trip segmentation that splits geographically distant trips even when time gaps are small
+- 2026-06-05: Implemented camera device detection and discovery API endpoints for catalog imports
 
 ## Open Issues
-- Pending badges still show for all system-generated memberships — consider auto-confirming travel and work trips
-- Trip geo split logic may need further tuning for edge cases like very short flights
+- Need to implement file selection UI in frontend components
 
 ## Key Files
-- `/home/irjudson/Projects/lumina/backend/categorize.py`: Main logic for grouping images into travel trips and other categories
-- `/home/irjudson/Projects/lumina/backend/models.py`: Database models defining trips, memberships, and face clusters
-- `/home/irjudson/Projects/lumina/backend/api.py`: API endpoints for managing memberships, clusters, and categorization
-- `/home/irjudson/Projects/lumina/frontend/src/components/Sidebar.jsx`: Sidebar UI showing clusters and navigation items with pending counts
-- `/home/irjudson/Projects/lumina/frontend/src/components/NavItem.jsx`: Navigation item component displaying counts and pending indicators
-- `/home/irjudson/Projects/lumina/frontend/src/components/FaceCluster.jsx`: UI for displaying and managing face clusters in the sidebar
-- `/home/irjudson/Projects/lumina/frontend/src/components/TravelTrip.jsx`: UI for displaying auto-generated travel trips and their pending memberships
-- `/home/irjudson/Projects/lumina/backend/db_cleanup.py`: Script to remove stale decade sub-collections and clean up old trip data
+- `src/backend/api/catalogs.ts`: Handles all catalog-related routes including new camera import endpoints
+- `src/backend/jobs/cameraImportJob.ts`: Defines the job logic for importing photos from connected cameras
+- `src/frontend/views/CameraImportView.vue`: Main view component for selecting devices and managing imports
+- `src/frontend/stores/cameraImportStore.ts`: Pinia store to manage state of camera import process including device list, selected files etc.
+- `src/backend/types/index.ts`: Contains type definitions used across backend services
+- `src/frontend/components/CameraDeviceList.vue`: Component listing available devices for photo import
+- `src/frontend/components/CameraFileGrid.vue`: UI component to display and select individual photos from a device
+- `docs/plans/2026-06-05-camera-import.md`: Design document outlining the implementation plan and requirements
 
 ## Recent Activity
-- 2026-05-25: Implemented geographic trip splitting logic to prevent merging of distant locations
-- 2026-05-25: Removed decade-based sub-collections from Family & Archival categories
-- 2026-05-25: Updated sidebar action label from 'Ignore this person' to 'Clear & unassign faces'
-- 2026-05-25: Fixed trip segmentation to use dynamic geographic jump detection
-- 2026-05-25: Deployed changes to categorize job and frontend
-- 2026-05-25: Committed all backend and frontend fixes to version control
-- 2026-05-25: Updated database to remove stale family/archival sub-collections
-- 2026-05-25: Configured pending badge behavior for system-generated memberships
-- 2026-05-25: Ensured travel trips are segmented by both time and geographic distance
-- 2026-05-25: Re-ran categorize job to apply new trip segmentation logic
+- 2026-06-05: Created camera import API endpoints for discovering devices and files
+- 2026-06-05: Defined backend job structure for importing photos from cameras
+- 2026-06-05: Started implementing frontend components for device selection and file grid display
+- 2026-06-05: Updated Pinia store to manage camera import state
+- 2026-06-05: Set up routing configuration for the new camera import feature
