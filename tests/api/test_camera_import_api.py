@@ -110,3 +110,11 @@ def test_discover_no_organized_directory_returns_400(client, db_session, tmp_pat
         json={"device_path": str(tmp_path)},
     )
     assert response.status_code == 400
+
+
+def test_discover_nonexistent_device_path_returns_404(client, catalog):
+    response = client.post(
+        f"/api/catalogs/{catalog.id}/camera/discover",
+        json={"device_path": "/nonexistent/path/that/does/not/exist"},
+    )
+    assert response.status_code == 404

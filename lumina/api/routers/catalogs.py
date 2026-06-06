@@ -4466,13 +4466,17 @@ def discover_camera_files(
 
     already_imported = set()
     # Phase 1: fast path — filename match
+    # Use '!' as ESCAPE char to avoid backslash complexity with PostgreSQL
     for candidate in candidates:
+        escaped = (
+            candidate.name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        )
         row = db.execute(
             sa_text(
                 "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                " AND source_path LIKE :pat LIMIT 1"
+                " AND source_path LIKE :pat ESCAPE '!' LIMIT 1"
             ),
-            {"cid": str(catalog_id), "pat": f"%/{candidate.name}"},
+            {"cid": str(catalog_id), "pat": f"%/{escaped}"},
         ).first()
         if row:
             already_imported.add(str(candidate))
@@ -4495,51 +4499,66 @@ def discover_camera_files(
             ).first()
             if row:
                 already_imported.add(str(candidate))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Could not checksum {candidate}: {e}")
 
     new_files = [c for c in candidates if str(c) not in already_imported]
 
     results = []
-    for f in new_files:
-        try:
-            with PILImage.open(str(f)) as img:
-                img.thumbnail((200, 200))
-                buf = _io.BytesIO()
-                img.convert("RGB").save(buf, format="JPEG", quality=60)
-                thumb = (
-                    "data:image/jpeg;base64,"
-                    + base64.b64encode(buf.getvalue()).decode()
+
+    try:
+        from lumina.analysis.metadata import MetadataExtractor
+        from lumina.core.types import FileType
+
+        _extractor_cm = MetadataExtractor()
+        _extractor = _extractor_cm.__enter__()
+    except Exception:
+        _extractor_cm = None
+        _extractor = None
+
+    try:
+        for f in new_files:
+            try:
+                with PILImage.open(str(f)) as img:
+                    img.thumbnail((200, 200))
+                    buf = _io.BytesIO()
+                    img.convert("RGB").save(buf, format="JPEG", quality=60)
+                    thumb = (
+                        "data:image/jpeg;base64,"
+                        + base64.b64encode(buf.getvalue()).decode()
+                    )
+            except Exception:
+                thumb = ""
+
+            taken_at = None
+            if _extractor is not None:
+                try:
+                    ft = (
+                        FileType.VIDEO
+                        if f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+                        else FileType.IMAGE
+                    )
+                    meta = _extractor.extract_metadata(f, ft)
+                    dates = _extractor.extract_dates(f, meta)
+                    if dates and dates.capture_time:
+                        taken_at = dates.capture_time.isoformat()
+                except Exception:
+                    pass
+
+            results.append(
+                DiscoveredFile(
+                    path=str(f),
+                    filename=f.name,
+                    size_bytes=f.stat().st_size,
+                    taken_at=taken_at,
+                    thumbnail_data_url=thumb,
                 )
-        except Exception:
-            thumb = ""
-
-        taken_at = None
-        try:
-            from lumina.analysis.metadata import MetadataExtractor
-            from lumina.core.types import FileType
-
-            ft = (
-                FileType.VIDEO
-                if f.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
-                else FileType.IMAGE
             )
-            with MetadataExtractor() as extractor:
-                meta = extractor.extract_metadata(f, ft)
-                dates = extractor.extract_dates(f, meta)
-                if dates and dates.capture_time:
-                    taken_at = dates.capture_time.isoformat()
-        except Exception:
-            pass
-
-        results.append(
-            DiscoveredFile(
-                path=str(f),
-                filename=f.name,
-                size_bytes=f.stat().st_size,
-                taken_at=taken_at,
-                thumbnail_data_url=thumb,
-            )
-        )
+    finally:
+        if _extractor_cm is not None:
+            try:
+                _extractor_cm.__exit__(None, None, None)
+            except Exception:
+                pass
 
     return results
