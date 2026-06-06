@@ -180,21 +180,26 @@ def test_travel_detection_flags_distant_images():
     from datetime import timedelta
 
     timeline_rows = []
-    # 20 images in Seattle spread before travel
-    for i in range(20):
-        d = base - timedelta(days=40 - i * 2)
+    # 60 images in Seattle before travel — keeps Paris fraction well below 5%
+    for i in range(60):
+        d = base - timedelta(days=120 - i * 2)
         timeline_rows.append((f"home-{i}", d, 47.6062, -122.3321))
 
-    # 5 images in Paris (travel) on a single day
+    # 6 images in Paris (travel) over 2 days — satisfies TRIP_MIN_DAYS=2, TRIP_MIN_IMAGES=5
+    # 6/126 total ≈ 4.8% < HOME_BASE_CELL_MIN_FRACTION(5%) so Paris is NOT a home base
     travel_day = base
-    for i in range(5):
+    for i in range(3):
         timeline_rows.append(
             (f"paris-{i}", travel_day + timedelta(hours=i), 48.8566, 2.3522)
         )
+    for i in range(3, 6):
+        timeline_rows.append(
+            (f"paris-{i}", travel_day + timedelta(days=1, hours=i - 3), 48.8566, 2.3522)
+        )
 
-    # 20 more images in Seattle after travel
-    for i in range(20):
-        d = base + timedelta(days=40 + i * 2)
+    # 60 more images in Seattle after travel
+    for i in range(60):
+        d = base + timedelta(days=5 + i * 2)
         timeline_rows.append((f"home-after-{i}", d, 47.6062, -122.3321))
 
     # Sort by capture_time (index 1)
@@ -222,7 +227,7 @@ def test_travel_detection_flags_distant_images():
     upsert_ids = [
         img_id for call in mock_upsert.call_args_list for img_id in call.args[2]
     ]
-    paris_ids = [f"paris-{i}" for i in range(5)]
+    paris_ids = [f"paris-{i}" for i in range(6)]
     assert any(pid in upsert_ids for pid in paris_ids)
 
 
@@ -241,10 +246,10 @@ def test_travel_returns_zero_with_fewer_than_10_gps_rows():
 
 
 def test_trip_grouping_small_gap_same_trip():
-    # Two days 2 apart → same trip (gap ≤ TRIP_MAX_GAP_DAYS=3)
+    # Two days 2 apart → same trip (gap ≤ TRIP_MAX_GAP_DAYS=5)
     from lumina.jobs.definitions.categorize import TRIP_MAX_GAP_DAYS
 
-    assert TRIP_MAX_GAP_DAYS == 3
+    assert TRIP_MAX_GAP_DAYS == 5
     d1 = date(2023, 6, 1)
     d2 = date(2023, 6, 3)  # 2 days gap
     assert (d2 - d1).days <= TRIP_MAX_GAP_DAYS
@@ -269,12 +274,13 @@ def test_travel_trip_grouping_via_full_function():
     home_base = (47.6, -122.3)
     travel = (48.85, 2.35)  # Paris
 
-    # Build surrounding home images (need >5 per surrounding window)
+    # Build surrounding home images (need >5 per surrounding window).
+    # Use 150 per side so Paris (15 images) is <5% of total and not flagged as home base.
     rows = []
-    for i in range(20):
-        d = base - timedelta(days=60 - i * 3)
+    for i in range(150):
+        d = base - timedelta(days=450 - i * 3)
         rows.append((f"h-pre-{i}", d, *home_base))
-    for i in range(20):
+    for i in range(150):
         d = base + timedelta(days=60 + i * 3)
         rows.append((f"h-post-{i}", d, *home_base))
 
