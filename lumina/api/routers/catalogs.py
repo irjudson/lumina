@@ -4521,42 +4521,26 @@ def discover_camera_files(
     organized_dir = Path(catalog.organized_directory)
 
     def _check_already_imported(f: Path, capture_time, stream_db) -> bool:
-        """No file reads — check predicted organized_path then filename+size."""
-        # Primary: predicted destination path, with LIKE to catch collision suffixes
-        # e.g. 20260605_190551.arw, 20260605_190551_1.arw, _2.arw, etc.
-        if capture_time is not None:
-            from lumina.jobs.definitions.organize import _make_date_dir, _make_filename
+        """Check if this specific file was already imported using timestamp dir + size.
 
-            predicted = Path(
-                organized_dir
-                / _make_date_dir(capture_time)
-                / _make_filename(capture_time, f.suffix.lower())
-            )
-            # Escape special LIKE chars in the stem, then match stem + optional _N suffix
-            stem = (
-                predicted.stem.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-            )
-            ext = predicted.suffix.replace("!", "!!").replace("%", "!%")
-            like_pat = str(predicted.parent) + "/" + stem + "%" + ext
-            row = stream_db.execute(
-                sa_text(
-                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                    " AND organized_path LIKE :pat ESCAPE '!' LIMIT 1"
-                ),
-                {"cid": cid_str, "pat": like_pat},
-            ).first()
-            if row:
-                return True
-        # Fallback: filename + size (catches files imported before organize)
-        escaped = f.name.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        Burst shots taken at the same second have different sizes, so
+        (date_dir, size_bytes) uniquely identifies each file without reading it.
+        """
+        if capture_time is None:
+            return False
+        file_size = f.stat().st_size
+        from lumina.jobs.definitions.organize import _make_date_dir
+
+        date_dir = str(organized_dir / _make_date_dir(capture_time))
         row = stream_db.execute(
             sa_text(
-                "SELECT size_bytes FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                " AND source_path LIKE :pat ESCAPE '!' LIMIT 1"
+                "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                " AND organized_path LIKE :dir_pat"
+                " AND size_bytes = :sz LIMIT 1"
             ),
-            {"cid": cid_str, "pat": f"%/{escaped}"},
+            {"cid": cid_str, "dir_pat": date_dir + "/%", "sz": file_size},
         ).first()
-        return bool(row and row[0] == f.stat().st_size)
+        return bool(row)
 
     def _process_one(f: Path):
         """Per-file work in thread: read EXIF date, dedup check, thumbnail. Returns JSON line or None."""
