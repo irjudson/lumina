@@ -4522,20 +4522,28 @@ def discover_camera_files(
 
     def _check_already_imported(f: Path, capture_time, stream_db) -> bool:
         """No file reads — check predicted organized_path then filename+size."""
-        # Primary: predicted destination path (exact match, fast)
+        # Primary: predicted destination path, with LIKE to catch collision suffixes
+        # e.g. 20260605_190551.arw, 20260605_190551_1.arw, _2.arw, etc.
         if capture_time is not None:
             from lumina.jobs.definitions.organize import _make_date_dir, _make_filename
 
-            predicted = str(
+            predicted = Path(
                 organized_dir
                 / _make_date_dir(capture_time)
                 / _make_filename(capture_time, f.suffix.lower())
             )
+            # Escape special LIKE chars in the stem, then match stem + optional _N suffix
+            stem = (
+                predicted.stem.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            )
+            ext = predicted.suffix.replace("!", "!!").replace("%", "!%")
+            like_pat = str(predicted.parent) + "/" + stem + "%" + ext
             row = stream_db.execute(
                 sa_text(
-                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid) AND organized_path = :p LIMIT 1"
+                    "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                    " AND organized_path LIKE :pat ESCAPE '!' LIMIT 1"
                 ),
-                {"cid": cid_str, "p": predicted},
+                {"cid": cid_str, "pat": like_pat},
             ).first()
             if row:
                 return True

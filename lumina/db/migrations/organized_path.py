@@ -14,6 +14,11 @@ def upgrade(engine):
         """
             )
         )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS idx_images_organized_path ON images (organized_path)"
+            )
+        )
 
 
 def downgrade(engine):
