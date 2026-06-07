@@ -289,8 +289,11 @@ def list_group_images(catalog_id: str, group_id: str, limit: int = 200):
 
 @router.post("/{catalog_id}/ml-groups/{group_id}/name")
 def name_ml_group(catalog_id: str, group_id: str, body: NameGroupRequest):
-    """Name an ML group — creates a folk tag and annotates all member images."""
-    tag_id = str(uuid.uuid4())
+    """Name an ML group — creates or reuses a folk tag and annotates all member images.
+
+    If a tag with the same label already exists in this catalog, the group's images
+    are merged into that existing tag rather than creating a duplicate.
+    """
     now = datetime.utcnow().isoformat()
 
     with get_db_context() as db:
@@ -303,24 +306,36 @@ def name_ml_group(catalog_id: str, group_id: str, body: NameGroupRequest):
         ).first():
             raise HTTPException(status_code=404, detail="Group not found")
 
-        slug = _unique_slug(db, catalog_id, _slugify(body.label))
-
-        db.execute(
+        # Reuse existing tag if the label already exists, merging images into it.
+        existing = db.execute(
             sa_text(
-                "INSERT INTO folk_tags (id, catalog_id, slug, label, parent_id)"
-                " VALUES (CAST(:id AS uuid), CAST(:cid AS uuid), :slug, :label,"
-                " CAST(:parent AS uuid))"
-                " ON CONFLICT (catalog_id, slug)"
-                " DO UPDATE SET label = EXCLUDED.label"
+                "SELECT id, slug FROM folk_tags"
+                " WHERE catalog_id = CAST(:cid AS uuid) AND label = :label"
+                " LIMIT 1"
             ),
-            {
-                "id": tag_id,
-                "cid": catalog_id,
-                "slug": slug,
-                "label": body.label,
-                "parent": body.parent_id,
-            },
-        )
+            {"cid": catalog_id, "label": body.label},
+        ).first()
+
+        if existing:
+            tag_id = str(existing.id)
+            slug = existing.slug
+        else:
+            tag_id = str(uuid.uuid4())
+            slug = _unique_slug(db, catalog_id, _slugify(body.label))
+            db.execute(
+                sa_text(
+                    "INSERT INTO folk_tags (id, catalog_id, slug, label, parent_id)"
+                    " VALUES (CAST(:id AS uuid), CAST(:cid AS uuid), :slug, :label,"
+                    " CAST(:parent AS uuid))"
+                ),
+                {
+                    "id": tag_id,
+                    "cid": catalog_id,
+                    "slug": slug,
+                    "label": body.label,
+                    "parent": body.parent_id,
+                },
+            )
 
         images = db.execute(
             sa_text(
