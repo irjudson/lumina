@@ -115,6 +115,24 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 continue
 
             try:
+                from sqlalchemy import text as sa_text
+
+                from lumina.analysis.scanner import compute_checksum
+
+                checksum = compute_checksum(source)
+                if checksum:
+                    with get_db_context() as check_db:
+                        already = check_db.execute(
+                            sa_text(
+                                "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
+                                " AND id = :chk LIMIT 1"
+                            ),
+                            {"cid": ctx.catalog_id, "chk": checksum},
+                        ).first()
+                    if already:
+                        skipped += 1
+                        continue
+
                 capture_time = _get_capture_time(source, extractor)
                 dest = _dest_path(output_dir, source, capture_time)
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -125,11 +143,8 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 this_cataloged = False
                 result = _process_file_sequential(dest, extractor)
                 if result is not None:
-                    from sqlalchemy import text as sa_text
-
                     image_record, _ = result
                     catalog_db.add_image(image_record)
-                    # Mark organized_path so discover dedup can detect re-imports
                     catalog_db.session.execute(
                         sa_text("UPDATE images SET organized_path = :p WHERE id = :id"),
                         {"p": str(dest), "id": image_record.id},

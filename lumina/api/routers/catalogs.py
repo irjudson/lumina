@@ -4518,27 +4518,19 @@ def discover_camera_files(
         except Exception:
             return ""
 
-    organized_dir = Path(catalog.organized_directory)
+    def _check_already_imported(f: Path, stream_db) -> bool:
+        """Check if this file was already imported by comparing its checksum to the catalog."""
+        from lumina.analysis.scanner import compute_checksum
 
-    def _check_already_imported(f: Path, capture_time, stream_db) -> bool:
-        """Check if this specific file was already imported using timestamp dir + size.
-
-        Burst shots taken at the same second have different sizes, so
-        (date_dir, size_bytes) uniquely identifies each file without reading it.
-        """
-        if capture_time is None:
+        checksum = compute_checksum(f)
+        if not checksum:
             return False
-        file_size = f.stat().st_size
-        from lumina.jobs.definitions.organize import _make_date_dir
-
-        date_dir = str(organized_dir / _make_date_dir(capture_time))
         row = stream_db.execute(
             sa_text(
                 "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                " AND organized_path LIKE :dir_pat"
-                " AND size_bytes = :sz LIMIT 1"
+                " AND id = :chk LIMIT 1"
             ),
-            {"cid": cid_str, "dir_pat": date_dir + "/%", "sz": file_size},
+            {"cid": cid_str, "chk": checksum},
         ).first()
         return bool(row)
 
@@ -4548,7 +4540,6 @@ def discover_camera_files(
         from lumina.core.types import FileType
         from lumina.db import get_db_context
 
-        capture_time = None
         taken_at = None
         try:
             with MetadataExtractor() as ext:
@@ -4560,13 +4551,12 @@ def discover_camera_files(
                 meta = ext.extract_metadata(f, ft)
                 dates = ext.extract_dates(f, meta)
                 if dates and dates.selected_date:
-                    capture_time = dates.selected_date
-                    taken_at = capture_time.isoformat()
+                    taken_at = dates.selected_date.isoformat()
         except Exception:
             pass
 
         with get_db_context() as db:
-            if _check_already_imported(f, capture_time, db):
+            if _check_already_imported(f, db):
                 return None
 
         return (
