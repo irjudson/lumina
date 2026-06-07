@@ -172,6 +172,72 @@ def delete_folk_tag(catalog_id: str, tag_id: str):
         db.commit()
 
 
+class MergeTagRequest(BaseModel):
+    into_tag_id: str
+
+
+@router.post("/{catalog_id}/folk-tags/{tag_id}/merge", status_code=200)
+def merge_folk_tag(catalog_id: str, tag_id: str, body: MergeTagRequest):
+    """Merge tag_id into into_tag_id: re-point all image annotations and ml_groups
+    references to the target tag, then delete the source tag."""
+    if tag_id == body.into_tag_id:
+        raise HTTPException(status_code=400, detail="Cannot merge a tag into itself")
+
+    with get_db_context() as db:
+        # Verify both tags exist in this catalog
+        for tid in (tag_id, body.into_tag_id):
+            if not db.execute(
+                sa_text(
+                    "SELECT 1 FROM folk_tags"
+                    " WHERE id = CAST(:id AS uuid) AND catalog_id = CAST(:cid AS uuid)"
+                ),
+                {"id": tid, "cid": catalog_id},
+            ).first():
+                raise HTTPException(status_code=404, detail=f"Tag {tid} not found")
+
+        # Re-point image annotations; skip duplicates (image already has the target tag)
+        db.execute(
+            sa_text(
+                "INSERT INTO folk_image_tags (image_id, tag_id, source, annotated_at)"
+                " SELECT image_id, CAST(:into AS uuid), source, annotated_at"
+                " FROM folk_image_tags"
+                " WHERE tag_id = CAST(:src AS uuid)"
+                " ON CONFLICT DO NOTHING"
+            ),
+            {"into": body.into_tag_id, "src": tag_id},
+        )
+
+        # Re-point ml_groups that reference the source tag
+        db.execute(
+            sa_text(
+                "UPDATE ml_groups SET tag_id = CAST(:into AS uuid)"
+                " WHERE tag_id = CAST(:src AS uuid)"
+                " AND catalog_id = CAST(:cid AS uuid)"
+            ),
+            {"into": body.into_tag_id, "src": tag_id, "cid": catalog_id},
+        )
+
+        # Delete source tag (cascades folk_image_tags rows for it)
+        db.execute(
+            sa_text(
+                "DELETE FROM folk_tags"
+                " WHERE id = CAST(:id AS uuid) AND catalog_id = CAST(:cid AS uuid)"
+            ),
+            {"id": tag_id, "cid": catalog_id},
+        )
+
+        merged_count = db.execute(
+            sa_text(
+                "SELECT COUNT(*) FROM folk_image_tags WHERE tag_id = CAST(:into AS uuid)"
+            ),
+            {"into": body.into_tag_id},
+        ).scalar()
+
+        db.commit()
+
+    return {"into_tag_id": body.into_tag_id, "image_count": merged_count}
+
+
 # ---------------------------------------------------------------------------
 # Bulk tag / untag images
 # ---------------------------------------------------------------------------
