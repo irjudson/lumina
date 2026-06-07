@@ -4559,8 +4559,8 @@ def discover_camera_files(
                 )
                 meta = ext.extract_metadata(f, ft)
                 dates = ext.extract_dates(f, meta)
-                if dates and dates.capture_time:
-                    capture_time = dates.capture_time
+                if dates and dates.selected_date:
+                    capture_time = dates.selected_date
                     taken_at = capture_time.isoformat()
         except Exception:
             pass

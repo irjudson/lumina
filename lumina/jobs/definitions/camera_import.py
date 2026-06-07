@@ -29,16 +29,16 @@ def _get_capture_time(source_path: Path, extractor=None):
         if extractor is not None:
             meta = extractor.extract_metadata(source_path, ft)
             dates = extractor.extract_dates(source_path, meta)
-            if dates and dates.capture_time:
-                return dates.capture_time
+            if dates and dates.selected_date:
+                return dates.selected_date
         else:
             from lumina.analysis.metadata import MetadataExtractor
 
             with MetadataExtractor() as ext:
                 meta = ext.extract_metadata(source_path, ft)
                 dates = ext.extract_dates(source_path, meta)
-                if dates and dates.capture_time:
-                    return dates.capture_time
+                if dates and dates.selected_date:
+                    return dates.selected_date
     except Exception:
         pass
     return datetime.fromtimestamp(source_path.stat().st_mtime)
