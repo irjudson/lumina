@@ -257,6 +257,36 @@ def list_ml_groups(catalog_id: str, status: str = "pending"):
     ]
 
 
+@router.get("/{catalog_id}/ml-groups/{group_id}/images")
+def list_group_images(catalog_id: str, group_id: str, limit: int = 200):
+    """Return images belonging to an ML group, with enough metadata to render thumbnails."""
+    with get_db_context() as db:
+        rows = db.execute(
+            sa_text(
+                "SELECT i.id, i.thumbnail_path, i.capture_time, i.source_path,"
+                "  mgi.score"
+                " FROM ml_group_images mgi"
+                " JOIN images i ON i.id = mgi.image_id"
+                " JOIN ml_groups mg ON mg.id = mgi.group_id"
+                " WHERE mgi.group_id = CAST(:gid AS uuid)"
+                "   AND mg.catalog_id = CAST(:cid AS uuid)"
+                " ORDER BY mgi.score DESC NULLS LAST, i.capture_time"
+                " LIMIT :lim"
+            ),
+            {"gid": group_id, "cid": catalog_id, "lim": limit},
+        ).fetchall()
+    return [
+        {
+            "id": str(r[0]),
+            "thumbnail_path": r[1],
+            "capture_time": r[2].isoformat() if r[2] else None,
+            "source_path": r[3],
+            "score": r[4],
+        }
+        for r in rows
+    ]
+
+
 @router.post("/{catalog_id}/ml-groups/{group_id}/name")
 def name_ml_group(catalog_id: str, group_id: str, body: NameGroupRequest):
     """Name an ML group — creates a folk tag and annotates all member images."""
