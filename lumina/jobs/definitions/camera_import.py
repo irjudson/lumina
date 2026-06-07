@@ -134,6 +134,7 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                         sa_text("UPDATE images SET organized_path = :p WHERE id = :id"),
                         {"p": str(dest), "id": image_record.id},
                     )
+                    catalog_db.session.commit()
                     imported_image_ids.append(image_record.id)
                     cataloged += 1
                     this_cataloged = True
@@ -233,3 +234,5 @@ def _upsert_last_import_collection(catalog_id: str, image_ids: list[str]) -> Non
                     "now": now,
                 },
             )
+
+        db.commit()
