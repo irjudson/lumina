@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { api } from '@/api/client'
 import type { CameraDevice, DiscoveredFile } from '@/api/client'
 import type { Job } from '@/stores/jobs'
@@ -33,6 +33,11 @@ export const useCameraImportStore = defineStore('cameraImport', () => {
       devices.value = []
     }
   }
+
+  // Fetch devices as soon as catalog becomes available (race-condition fix)
+  watch(() => catalogStore.activeCatalog, (catalog) => {
+    if (catalog && devices.value.length === 0) fetchDevices()
+  })
 
   let _discoverAbort: AbortController | null = null
 
