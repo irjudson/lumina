@@ -125,8 +125,15 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                 this_cataloged = False
                 result = _process_file_sequential(dest, extractor)
                 if result is not None:
+                    from sqlalchemy import text as sa_text
+
                     image_record, _ = result
                     catalog_db.add_image(image_record)
+                    # Mark organized_path so discover dedup can detect re-imports
+                    catalog_db.session.execute(
+                        sa_text("UPDATE images SET organized_path = :p WHERE id = :id"),
+                        {"p": str(dest), "id": image_record.id},
+                    )
                     imported_image_ids.append(image_record.id)
                     cataloged += 1
                     this_cataloged = True
