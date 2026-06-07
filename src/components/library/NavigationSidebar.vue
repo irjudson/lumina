@@ -151,39 +151,64 @@
 
                 <!-- Leaf child (no sub-children) -->
                 <template v-else>
-                  <div
-                    class="flex items-center gap-1 group/draggable rounded transition-colors"
-                    :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === child.id }"
-                    draggable="true"
-                    @dragstart="onDragStart($event, child)"
-                    @dragover="onDragOver($event, child)"
-                    @dragleave="onDragLeave"
-                    @drop="onDrop($event, child)"
-                    @dragend="onDragEnd"
-                  >
-                    <span
-                      class="shrink-0 w-3 cursor-grab text-gray-700 opacity-0 group-hover/draggable:opacity-100 transition-opacity select-none"
-                      title="Drag to reorder"
-                    >⠿</span>
-                    <CollectionLabel
-                      :collection="child"
-                      :active="activeView === `collection:${child.id}`"
-                      :renaming="renaming?.id === child.id"
-                      :rename-value="renaming?.value ?? ''"
-                      icon=""
+                  <!-- Travel trips: multi-line layout -->
+                  <template v-if="child.systemKey?.startsWith('travel_trip:')">
+                    <button
+                      class="w-full px-3 py-1.5 text-left rounded transition-colors"
+                      :class="activeView === `collection:${child.id}` ? 'bg-blue-600' : 'hover:bg-gray-800'"
                       @click="$emit('navigate', `collection:${child.id}`)"
-                      @dblclick="startRename(child)"
                       @contextmenu.prevent="showContextMenu($event, child)"
-                      @rename-input="v => { if (renaming) renaming.value = v }"
-                      @rename-save="saveRename"
-                      @rename-cancel="cancelRename"
-                    />
-                    <span
-                      v-if="child.pendingCount > 0"
-                      class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
-                      :title="`${child.pendingCount} unreviewed`"
-                    >{{ child.pendingCount }}</span>
-                  </div>
+                    >
+                      <div v-if="tripParts(child.name).location" class="text-xs font-medium leading-snug"
+                        :class="activeView === `collection:${child.id}` ? 'text-white' : 'text-gray-200'">
+                        {{ tripParts(child.name).location }}
+                      </div>
+                      <div class="text-xs leading-snug"
+                        :class="activeView === `collection:${child.id}` ? 'text-blue-100' : 'text-gray-400'">
+                        {{ tripParts(child.name).dates }}
+                      </div>
+                      <div class="text-xs leading-snug"
+                        :class="activeView === `collection:${child.id}` ? 'text-blue-200' : 'text-gray-600'">
+                        {{ child.imageCount }} photos
+                      </div>
+                    </button>
+                  </template>
+                  <!-- Other leaf collections: single-line -->
+                  <template v-else>
+                    <div
+                      class="flex items-center gap-1 group/draggable rounded transition-colors"
+                      :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === child.id }"
+                      draggable="true"
+                      @dragstart="onDragStart($event, child)"
+                      @dragover="onDragOver($event, child)"
+                      @dragleave="onDragLeave"
+                      @drop="onDrop($event, child)"
+                      @dragend="onDragEnd"
+                    >
+                      <span
+                        class="shrink-0 w-3 cursor-grab text-gray-700 opacity-0 group-hover/draggable:opacity-100 transition-opacity select-none"
+                        title="Drag to reorder"
+                      >⠿</span>
+                      <CollectionLabel
+                        :collection="child"
+                        :active="activeView === `collection:${child.id}`"
+                        :renaming="renaming?.id === child.id"
+                        :rename-value="renaming?.value ?? ''"
+                        icon=""
+                        @click="$emit('navigate', `collection:${child.id}`)"
+                        @dblclick="startRename(child)"
+                        @contextmenu.prevent="showContextMenu($event, child)"
+                        @rename-input="v => { if (renaming) renaming.value = v }"
+                        @rename-save="saveRename"
+                        @rename-cancel="cancelRename"
+                      />
+                      <span
+                        v-if="child.pendingCount > 0"
+                        class="shrink-0 px-1.5 py-0.5 text-xs rounded-full bg-amber-600/30 text-amber-400 font-medium"
+                        :title="`${child.pendingCount} unreviewed`"
+                      >{{ child.pendingCount }}</span>
+                    </div>
+                  </template>
                 </template>
               </template>
               <p v-if="childrenOf(col.id).length === 0 && col.childCount > 0" class="text-xs text-gray-600 px-3 py-1">Loading…</p>
@@ -508,6 +533,15 @@ const systemCollections = computed(() =>
 const userCollections = computed(() =>
   (props.collections ?? []).filter(c => c.source !== 'system' && !c.parentId)
 )
+
+const MONTH_ABBREVS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+function tripParts(name: string): { location: string; dates: string } {
+  const sep = name.indexOf(' – ')
+  if (sep === -1) return { location: '', dates: name }
+  const first = name.slice(0, sep)
+  if (MONTH_ABBREVS.some(m => first.startsWith(m))) return { location: '', dates: name }
+  return { location: first, dates: name.slice(sep + 3) }
+}
 
 function childrenOf(parentId: string): Collection[] {
   const all = (props.collections ?? []).filter(c => c.parentId === parentId)
