@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..db import get_db, init_db
 from ..db.models import Catalog
-from .routers import analytics, catalogs, collections, duplicates
+from .routers import analytics, catalogs, collections, duplicates, folk_tags
 from .routers import jobs_new as jobs
 from .routers import warehouse
 
@@ -225,6 +225,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router, prefix="/api/catalogs", tags=["analytics"])
     app.include_router(catalogs.router, prefix="/api/catalogs", tags=["catalogs"])
     app.include_router(collections.router, prefix="/api/catalogs", tags=["collections"])
+    app.include_router(folk_tags.router, prefix="/api/catalogs", tags=["folk-tags"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
     app.include_router(warehouse.router, prefix="/api/warehouse", tags=["warehouse"])
 

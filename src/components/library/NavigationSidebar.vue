@@ -44,7 +44,7 @@
               </button>
               <span v-else class="w-5 shrink-0" />
               <NavItem
-                icon="Layers"
+                :icon="systemCollectionIcon[col.systemKey ?? ''] ?? 'Layers'"
                 :label="col.name"
                 :count="col.imageCount || undefined"
                 :active="activeView === `collection:${col.id}`"
@@ -490,6 +490,16 @@ function toggleExpanded(id: string) {
     emit('load-children', id)
   }
   expandedCategories.value = new Set(expandedCategories.value)
+}
+
+const systemCollectionIcon: Record<string, string> = {
+  last_import:       'Download',
+  people:            'Users',
+  projects:          'Briefcase',
+  archival:          'Archive',
+  work_professional: 'Briefcase',
+  family_personal:   'Heart',
+  travel:            'Plane',
 }
 
 const systemCollections = computed(() =>
