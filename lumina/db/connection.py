@@ -100,36 +100,8 @@ SYSTEM_COLLECTIONS = [
 
 
 def _seed_system_collections(db: Session) -> None:
-    """Create system collections for every catalog (idempotent)."""
-    from .models import Catalog, Collection
-
-    catalogs = db.query(Catalog).all()
-    added = 0
-    for catalog in catalogs:
-        existing_keys = {
-            c.system_key
-            for c in db.query(Collection.system_key)
-            .filter(
-                Collection.catalog_id == catalog.id,
-                Collection.system_key.isnot(None),
-            )
-            .all()
-        }
-        for spec in SYSTEM_COLLECTIONS:
-            if spec["system_key"] not in existing_keys:
-                db.add(
-                    Collection(
-                        catalog_id=catalog.id,
-                        name=spec["name"],
-                        description=spec["description"],
-                        source="system",
-                        system_key=spec["system_key"],
-                    )
-                )
-                added += 1
-    if added:
-        db.commit()
-        logger.info(f"Seeded {added} system collection(s)")
+    """No-op: system collections replaced by folksonomy tags."""
+    pass
 
 
 def init_db() -> None:
@@ -199,6 +171,18 @@ def init_db() -> None:
 
     upgrade_collection_sort(engine)
     logger.info("collection_sort migration applied")
+
+    # Folksonomy tag system (idempotent)
+    from .migrations.tags_folksonomy import upgrade as upgrade_tags
+
+    upgrade_tags(engine)
+    logger.info("Tags folksonomy migration applied")
+
+    # Migrate face/travel collections to tags, delete empty system collections
+    from .migrations.collections_to_tags import upgrade as upgrade_collections_to_tags
+
+    upgrade_collections_to_tags(engine)
+    logger.info("Collections to tags migration applied")
 
     # Populate reference tables
     db = SessionLocal()
