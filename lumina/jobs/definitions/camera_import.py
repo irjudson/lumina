@@ -125,7 +125,7 @@ def camera_import_job(ctx: JobContext) -> Dict[str, Any]:
                         already = check_db.execute(
                             sa_text(
                                 "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                                " AND id = :chk LIMIT 1"
+                                " AND checksum = :chk LIMIT 1"
                             ),
                             {"cid": ctx.catalog_id, "chk": checksum},
                         ).first()

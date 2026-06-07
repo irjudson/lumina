@@ -4528,7 +4528,7 @@ def discover_camera_files(
         row = stream_db.execute(
             sa_text(
                 "SELECT 1 FROM images WHERE catalog_id = CAST(:cid AS uuid)"
-                " AND id = :chk LIMIT 1"
+                " AND checksum = :chk LIMIT 1"
             ),
             {"cid": cid_str, "chk": checksum},
         ).first()
