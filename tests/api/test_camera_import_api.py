@@ -1,3 +1,4 @@
+import json
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -6,6 +7,13 @@ import pytest
 from PIL import Image as PILImage
 
 from lumina.db.models import Catalog
+
+
+def _parse_ndjson(response):
+    return [
+        json.loads(line) for line in response.text.strip().split("\n") if line.strip()
+    ]
+
 
 pytestmark = pytest.mark.integration
 
@@ -60,37 +68,36 @@ def test_discover_returns_new_files(client, catalog, tmp_path):
         json={"device_path": str(tmp_path)},
     )
     assert response.status_code == 200
-    files = response.json()
+    files = _parse_ndjson(response)
     assert len(files) == 1
     assert files[0]["filename"] == "IMG_001.jpg"
     assert files[0]["thumbnail_data_url"].startswith("data:image/jpeg;base64,")
 
 
-def test_discover_skips_already_cataloged(client, catalog, db_session, tmp_path):
-    from lumina.db.models import Image
+def test_discover_skips_already_cataloged(client, catalog, tmp_path):
+    from unittest.mock import MagicMock
 
     img_path = tmp_path / "IMG_002.jpg"
     PILImage.new("RGB", (100, 100)).save(str(img_path))
 
-    existing = Image(
-        id=str(uuid.uuid4()),
-        catalog_id=str(catalog.id),
-        source_path=str(img_path),
-        file_type="image",
-        checksum="abc123",
-        size_bytes=100,
-        dates={},
-        metadata_json={},
-    )
-    db_session.add(existing)
-    db_session.commit()
+    # _check_already_imported uses get_db_context() (new connection, can't see test
+    # savepoint data). Mock compute_checksum + get_db_context to simulate "already in DB".
+    mock_db = MagicMock()
+    mock_db.execute.return_value.first.return_value = (1,)
+    mock_cm = MagicMock()
+    mock_cm.__enter__ = MagicMock(return_value=mock_db)
+    mock_cm.__exit__ = MagicMock(return_value=False)
 
-    response = client.post(
-        f"/api/catalogs/{catalog.id}/camera/discover",
-        json={"device_path": str(tmp_path)},
-    )
+    with (
+        patch("lumina.analysis.scanner.compute_checksum", return_value="fixed_hash"),
+        patch("lumina.db.get_db_context", return_value=mock_cm),
+    ):
+        response = client.post(
+            f"/api/catalogs/{catalog.id}/camera/discover",
+            json={"device_path": str(tmp_path)},
+        )
     assert response.status_code == 200
-    assert response.json() == []
+    assert _parse_ndjson(response) == []
 
 
 def test_discover_no_organized_directory_returns_400(client, db_session, tmp_path):
