@@ -214,6 +214,8 @@ def test_thumbnail_handles_missing_source_file(
     client, sample_catalog_with_images, db_session, tmp_path
 ):
     """Test that thumbnail generation handles missing source file gracefully."""
+    from unittest.mock import patch
+
     catalog_id, image_id, _ = sample_catalog_with_images
 
     # Update image record to point to non-existent file
@@ -225,5 +227,12 @@ def test_thumbnail_handles_missing_source_file(
     )
     db_session.commit()
 
-    response = client.get(f"/api/catalogs/{catalog_id}/images/{image_id}/thumbnail")
+    # Redirect the thumbnails dir to tmp_path so the endpoint can check the cache
+    # without hitting /app (inaccessible on the test host). No thumbnail file is
+    # placed there, so the endpoint falls through to the source-file check → 404.
+    with patch(
+        "lumina.api.routers.catalogs.get_thumbnail_path",
+        return_value=tmp_path / f"{image_id}.jpg",
+    ):
+        response = client.get(f"/api/catalogs/{catalog_id}/images/{image_id}/thumbnail")
     assert response.status_code == 404

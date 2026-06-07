@@ -1147,10 +1147,6 @@ def get_image_thumbnail(
     source_path = Path(result[0])
     edit_data = result[1]
 
-    # Check if source file exists
-    if not source_path.exists():
-        raise HTTPException(status_code=404, detail="Source file not found")
-
     # Check if image has transforms
     has_transforms = False
     rotation = 0
@@ -1164,32 +1160,39 @@ def get_image_thumbnail(
         flip_v = transforms.get("flip_v", False)
         has_transforms = rotation != 0 or flip_h or flip_v
 
-    # If no transforms, use cached thumbnail
+    # If no transforms, serve from cache (generating if needed)
     if not has_transforms:
         thumbnails_dir = Path(f"/app/catalogs/{catalog_id}/thumbnails")
         thumbnail_path = get_thumbnail_path(
             image_id=image_id, thumbnails_dir=thumbnails_dir, size=size
         )
 
-        # Generate thumbnail if it doesn't exist
-        if not thumbnail_path.exists():
-            thumb_size = THUMBNAIL_SIZES[size]
-            success = generate_thumbnail(
-                source_path=source_path,
-                output_path=thumbnail_path,
-                size=thumb_size,
-                quality=quality,
+        # Return cached thumbnail immediately — no source-file check needed
+        if thumbnail_path.exists():
+            return FileResponse(
+                thumbnail_path,
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=31536000"},
             )
-            if not success:
-                raise HTTPException(
-                    status_code=500, detail="Failed to generate thumbnail"
-                )
 
-        # Return the cached thumbnail file
+        # Cache miss: need the source file to generate
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Source file not found")
+
+        thumb_size = THUMBNAIL_SIZES[size]
+        success = generate_thumbnail(
+            source_path=source_path,
+            output_path=thumbnail_path,
+            size=thumb_size,
+            quality=quality,
+        )
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to generate thumbnail")
+
         return FileResponse(
             thumbnail_path,
             media_type="image/jpeg",
-            headers={"Cache-Control": "public, max-age=31536000"},  # Cache for 1 year
+            headers={"Cache-Control": "public, max-age=31536000"},
         )
 
     # Image has transforms - generate transformed thumbnail on-the-fly
