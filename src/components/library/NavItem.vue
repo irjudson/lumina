@@ -13,6 +13,7 @@
   >
     <!-- Icon -->
     <component
+      v-if="icon"
       :is="iconComponent"
       :class="[
         'w-4 h-4',
