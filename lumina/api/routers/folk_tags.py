@@ -306,11 +306,11 @@ def name_ml_group(catalog_id: str, group_id: str, body: NameGroupRequest):
         ).first():
             raise HTTPException(status_code=404, detail="Group not found")
 
-        # Reuse existing tag if the label already exists, merging images into it.
+        # Reuse existing tag if the label already exists (case-insensitive), merging images into it.
         existing = db.execute(
             sa_text(
                 "SELECT id, slug FROM folk_tags"
-                " WHERE catalog_id = CAST(:cid AS uuid) AND label = :label"
+                " WHERE catalog_id = CAST(:cid AS uuid) AND lower(label) = lower(:label)"
                 " LIMIT 1"
             ),
             {"cid": catalog_id, "label": body.label},
