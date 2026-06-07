@@ -70,8 +70,8 @@
             <!-- Children of this system category -->
             <div v-if="expandedCategories.has(col.id)" class="pl-5 space-y-0.5">
               <template v-for="child in childrenOf(col.id)" :key="child.id">
-                <!-- If the child itself has children it's a group (e.g. "My Family") -->
-                <template v-if="child.childCount > 0 || groupChildrenOf(child.id).length > 0">
+                <!-- If the child itself has children it's a group (e.g. "My Family"), but not travel trips -->
+                <template v-if="(child.childCount > 0 || groupChildrenOf(child.id).length > 0) && !child.systemKey?.startsWith('travel_trip:')">
                   <div
                     class="flex items-center gap-1 group/draggable rounded transition-colors"
                     :class="{ 'ring-1 ring-blue-500 bg-blue-500/10': dragOver === child.id }"
