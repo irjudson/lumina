@@ -447,10 +447,26 @@ class MetadataExtractor:
             selected_naive = date_info.selected_date
             if hasattr(selected_naive, "tzinfo") and selected_naive.tzinfo is not None:
                 selected_naive = selected_naive.replace(tzinfo=None)
-            # Future date
+            # Future date — flag and fall back to a filesystem-derived date
             if selected_naive > now:
                 date_info.suspicious = True
                 logger.warning(f"Future date detected: {date_info.selected_date}")
+                fallback = (
+                    date_info.exif_dates.get("FileModifyDate")
+                    or date_info.filesystem_modified
+                    or date_info.filesystem_created
+                )
+                if fallback:
+                    fallback_naive = fallback
+                    if (
+                        hasattr(fallback_naive, "tzinfo")
+                        and fallback_naive.tzinfo is not None
+                    ):
+                        fallback_naive = fallback_naive.replace(tzinfo=None)
+                    if fallback_naive <= now:
+                        date_info.selected_date = fallback
+                        date_info.selected_source = "filesystem_fallback"
+                        date_info.confidence = 25
 
             # Very old date (before 1990)
             if selected_naive.year < 1990:

@@ -509,7 +509,10 @@ def list_catalog_images(
     # Build ORDER BY clause
     order_direction = "DESC" if sort_order.lower() == "desc" else "ASC"
     order_clauses = {
-        "date": f"(dates->>'selected_date')::timestamp {order_direction} NULLS LAST",
+        "date": (
+            f"CASE WHEN (dates->>'selected_date')::timestamp > NOW() THEN NULL "
+            f"ELSE (dates->>'selected_date')::timestamp END {order_direction} NULLS LAST"
+        ),
         "filename": f"source_path {order_direction}",
         "size": f"size_bytes {order_direction}",
         "camera": f"metadata->>'camera_model' {order_direction} NULLS LAST",
