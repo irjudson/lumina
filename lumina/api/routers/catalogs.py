@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import uuid
+import zipfile
 from datetime import datetime
 from math import cos, radians
 from pathlib import Path
@@ -3773,6 +3774,212 @@ def get_full_image(
     except Exception as e:
         logger.error(f"Error applying transforms to {source_path}: {e}")
         raise HTTPException(status_code=500, detail=f"Error applying transforms: {e}")
+
+
+@router.get("/{catalog_id}/images/{image_id}/export-web", response_model=None)
+def export_web_image(
+    catalog_id: uuid.UUID,
+    image_id: str,
+    format: str = Query("jpeg", description="Output format: jpeg, webp, png"),
+    quality: int = Query(85, ge=1, le=100, description="Quality for jpeg/webp (1-100)"),
+    max_width: int = Query(0, ge=0, description="Max width in pixels (0 = original)"),
+    max_height: int = Query(0, ge=0, description="Max height in pixels (0 = original)"),
+    db: Session = Depends(get_db),
+):
+    """Export an image resized and converted for web publishing.
+
+    Handles RAW, HEIC, and standard formats. Applies EXIF orientation and
+    optional stored transforms. Returns a downloadable file.
+    """
+    format = format.lower()
+    if format not in ("jpeg", "webp", "png"):
+        format = "jpeg"
+
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    row = db.execute(
+        text(
+            "SELECT source_path, edit_data FROM images "
+            "WHERE id = :id AND catalog_id = :catalog_id"
+        ),
+        {"id": image_id, "catalog_id": str(catalog_id)},
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    source_path = Path(row[0])
+    edit_data = row[1]
+
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Source file not found on disk")
+
+    try:
+        img = load_image_any_format(source_path, full_size=True)
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode not in ("RGB", "RGBA", "L"):
+            img = img.convert("RGB")
+        if format != "png" and img.mode == "RGBA":
+            img = img.convert("RGB")
+
+        # Apply stored transforms (rotation/flip)
+        if edit_data:
+            transforms = edit_data.get("transforms", {})
+            rotation = transforms.get("rotation", 0)
+            flip_h = transforms.get("flip_h", False)
+            flip_v = transforms.get("flip_v", False)
+            if rotation:
+                img = img.rotate(-rotation, expand=True)
+            if flip_h:
+                img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+            if flip_v:
+                img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+        # Resize if requested
+        if max_width > 0 or max_height > 0:
+            orig_w, orig_h = img.size
+            target_w = max_width or orig_w
+            target_h = max_height or orig_h
+            ratio = min(target_w / orig_w, target_h / orig_h)
+            if ratio < 1.0:
+                new_w = max(1, round(orig_w * ratio))
+                new_h = max(1, round(orig_h * ratio))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        stem = source_path.stem
+        ext_map = {"jpeg": "jpg", "webp": "webp", "png": "png"}
+        mime_map = {"jpeg": "image/jpeg", "webp": "image/webp", "png": "image/png"}
+        ext = ext_map[format]
+        filename = f"{stem}_export.{ext}"
+
+        buffer = io.BytesIO()
+        save_kwargs: dict = {"format": format.upper()}
+        if format in ("jpeg", "webp"):
+            save_kwargs["quality"] = quality
+        if format == "jpeg":
+            save_kwargs["optimize"] = True
+        img.save(buffer, **save_kwargs)
+        buffer.seek(0)
+
+        return StreamingResponse(
+            buffer,
+            media_type=mime_map[format],
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Cache-Control": "no-cache",
+            },
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting {source_path}: {e}")
+        raise HTTPException(status_code=500, detail=f"Export failed: {e}")
+
+
+class BulkExportRequest(BaseModel):
+    image_ids: List[str]
+    format: str = "jpeg"
+    quality: int = 85
+    max_width: int = 0
+    filename_prefix: str = ""
+
+
+@router.post("/{catalog_id}/images/export-web-bulk", response_model=None)
+def export_web_bulk(
+    catalog_id: uuid.UUID,
+    body: BulkExportRequest,
+    db: Session = Depends(get_db),
+):
+    """Export multiple images as a ZIP archive, resized and converted for web."""
+    fmt = body.format.lower()
+    if fmt not in ("jpeg", "webp", "png"):
+        fmt = "jpeg"
+    if not body.image_ids:
+        raise HTTPException(status_code=400, detail="No image IDs provided")
+
+    catalog = db.query(Catalog).filter(Catalog.id == catalog_id).first()
+    if not catalog:
+        raise HTTPException(status_code=404, detail="Catalog not found")
+
+    rows = db.execute(
+        text(
+            "SELECT id, source_path, edit_data FROM images "
+            "WHERE id = ANY(CAST(:ids AS uuid[])) AND catalog_id = :catalog_id"
+        ),
+        {"ids": body.image_ids, "catalog_id": str(catalog_id)},
+    ).fetchall()
+
+    ext_map = {"jpeg": "jpg", "webp": "webp", "png": "png"}
+    ext = ext_map[fmt]
+    prefix = body.filename_prefix.strip() if body.filename_prefix else ""
+
+    zip_buffer = io.BytesIO()
+    seen_names: dict = {}
+
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_STORED) as zf:
+        for row in rows:
+            source_path = Path(row[1])
+            edit_data = row[2]
+            if not source_path.exists():
+                continue
+            try:
+                img = load_image_any_format(source_path, full_size=True)
+                img = ImageOps.exif_transpose(img)
+                if img.mode not in ("RGB", "RGBA", "L"):
+                    img = img.convert("RGB")
+                if fmt != "png" and img.mode == "RGBA":
+                    img = img.convert("RGB")
+
+                if edit_data:
+                    transforms = edit_data.get("transforms", {})
+                    rotation = transforms.get("rotation", 0)
+                    flip_h = transforms.get("flip_h", False)
+                    flip_v = transforms.get("flip_v", False)
+                    if rotation:
+                        img = img.rotate(-rotation, expand=True)
+                    if flip_h:
+                        img = img.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                    if flip_v:
+                        img = img.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+
+                if body.max_width > 0:
+                    orig_w, orig_h = img.size
+                    if orig_w > body.max_width:
+                        ratio = body.max_width / orig_w
+                        img = img.resize(
+                            (body.max_width, max(1, round(orig_h * ratio))),
+                            Image.Resampling.LANCZOS,
+                        )
+
+                stem = source_path.stem
+                base_name = f"{prefix}_{stem}" if prefix else stem
+                candidate = f"{base_name}.{ext}"
+                count = seen_names.get(candidate, 0)
+                if count:
+                    candidate = f"{base_name}_{count}.{ext}"
+                seen_names[f"{base_name}.{ext}"] = count + 1
+
+                img_buffer = io.BytesIO()
+                save_kwargs: dict = {"format": fmt.upper()}
+                if fmt in ("jpeg", "webp"):
+                    save_kwargs["quality"] = body.quality
+                if fmt == "jpeg":
+                    save_kwargs["optimize"] = True
+                img.save(img_buffer, **save_kwargs)
+                zf.writestr(candidate, img_buffer.getvalue())
+            except Exception as e:
+                logger.warning(f"Skipping {source_path} in bulk export: {e}")
+                continue
+
+    zip_buffer.seek(0)
+    zip_name = f"{prefix}_export.zip" if prefix else "lumina_export.zip"
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
 
 
 @router.post("/{catalog_id}/images/{image_id}/export-xmp")
