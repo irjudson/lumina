@@ -189,16 +189,58 @@
           <div
             v-if="contextMenu.visible"
             class="fixed z-50 bg-gray-800 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[180px]"
-            :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+            :style="contextMenuStyle"
             @click.stop
           >
             <button
-              v-if="activePersonCollectionId"
-              class="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 flex items-center gap-2"
-              @click="removeFaceMatch"
+              class="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+              @click="contextMenuOpen"
             >
-              Not this person
+              <EyeIcon class="w-4 h-4 text-gray-400" />
+              Open
             </button>
+            <button
+              class="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+              @click="contextMenuToggleFavorite"
+            >
+              <StarOffIcon v-if="contextMenuIsFavorite" class="w-4 h-4 text-yellow-400" />
+              <StarIcon v-else class="w-4 h-4 text-gray-400" />
+              {{ contextMenuIsFavorite ? 'Remove from Favorites' : 'Add to Favorites' }}
+            </button>
+            <button
+              class="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 flex items-center gap-2"
+              @click="contextMenuExport"
+            >
+              <DownloadIcon class="w-4 h-4 text-gray-400" />
+              Export…
+            </button>
+            <div class="border-t border-gray-700 my-1" />
+            <button
+              v-if="currentView !== 'rejected'"
+              class="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 flex items-center gap-2"
+              @click="contextMenuReject"
+            >
+              <Trash2Icon class="w-4 h-4" />
+              Reject
+            </button>
+            <button
+              v-else
+              class="w-full text-left px-4 py-2 text-sm text-green-400 hover:bg-gray-700 flex items-center gap-2"
+              @click="contextMenuRestore"
+            >
+              <RotateCwIcon class="w-4 h-4" />
+              Restore
+            </button>
+            <template v-if="activePersonCollectionId">
+              <div class="border-t border-gray-700 my-1" />
+              <button
+                class="w-full text-left px-4 py-2 text-sm text-red-400 hover:bg-gray-700 flex items-center gap-2"
+                @click="removeFaceMatch"
+              >
+                <UserXIcon class="w-4 h-4" />
+                Not this person
+              </button>
+            </template>
           </div>
 
           <!-- Click-away to close context menu -->
@@ -520,6 +562,17 @@
                   </div>
                 </div>
 
+                <!-- Export -->
+                <div class="pt-2 border-t border-gray-800">
+                  <button
+                    @click="bulkExportSelected"
+                    class="w-full px-3 py-2 text-left text-sm bg-blue-900/30 hover:bg-blue-900/50 text-blue-400 rounded transition-colors flex items-center gap-2"
+                  >
+                    <DownloadIcon class="w-4 h-4" />
+                    <span>Export Selected…</span>
+                  </button>
+                </div>
+
                 <!-- Reject / Restore -->
                 <div class="pt-2 border-t border-gray-800 space-y-1">
                   <button
@@ -679,6 +732,16 @@
       @reject="id => id && rejectSingleImage(id)"
       @favorite="id => id && favoritesStore.addFavorites([id])"
     />
+
+    <!-- Export Modal (single via context menu, or bulk via selection) -->
+    <ExportModal
+      v-if="exportModal.visible && catalogStore.activeCatalog"
+      :catalog-id="catalogStore.activeCatalog.id"
+      :image-id="exportModal.imageId || undefined"
+      :filename="exportModal.filename || undefined"
+      :image-ids="exportModal.imageIds.length ? exportModal.imageIds : undefined"
+      @close="exportModal.visible = false"
+    />
   </LibraryLayout>
 </template>
 
@@ -705,10 +768,11 @@ import EventsView from '@/components/views/EventsView.vue'
 import AnalyticsView from '@/components/views/AnalyticsView.vue'
 import SkippedImportsView from '@/components/views/SkippedImportsView.vue'
 import ImageDetailOverlay from '@/components/views/ImageDetailOverlay.vue'
+import ExportModal from '@/components/views/ExportModal.vue'
 import NavigationSidebar from '@/components/library/NavigationSidebar.vue'
 import FilterBar from '@/components/library/FilterBar.vue'
 import FaceOverlay from '@/components/library/FaceOverlay.vue'
-import { ImageIcon, SettingsIcon, LoaderIcon, AlertCircleIcon, Star as StarIcon, Folder as FolderIcon, Sparkles as SparklesIcon, Copy as CopyIcon, Zap as ZapIcon, ImagePlus as ImagePlusIcon, RefreshCw as RefreshCwIcon, ChevronDown as ChevronDownIcon, FileWarning as FileWarningIcon, RotateCcw as RotateCcwIcon, PartyPopper as PartyPopperIcon, Layers as LayersIcon, Users as UsersIcon } from 'lucide-vue-next'
+import { ImageIcon, SettingsIcon, LoaderIcon, AlertCircleIcon, Star as StarIcon, StarOff as StarOffIcon, Folder as FolderIcon, Sparkles as SparklesIcon, Copy as CopyIcon, Zap as ZapIcon, ImagePlus as ImagePlusIcon, RefreshCw as RefreshCwIcon, ChevronDown as ChevronDownIcon, FileWarning as FileWarningIcon, RotateCcw as RotateCcwIcon, PartyPopper as PartyPopperIcon, Layers as LayersIcon, Users as UsersIcon, Eye as EyeIcon, Trash2 as Trash2Icon, RotateCw as RotateCwIcon, UserX as UserXIcon, Download as DownloadIcon } from 'lucide-vue-next'
 import type { Image, FileType, ImageStatus } from '@/stores/library'
 import CatalogSettings from '@/views/CatalogSettings.vue'
 import CreateCollectionModal from '@/components/collections/CreateCollectionModal.vue'
@@ -729,6 +793,9 @@ const filterBarExpanded = ref(false)
 const contextMenu = ref<{ visible: boolean; x: number; y: number; imageId: string }>({
   visible: false, x: 0, y: 0, imageId: ''
 })
+const exportModal = ref<{ visible: boolean; imageId: string; filename: string; imageIds: string[] }>({
+  visible: false, imageId: '', filename: '', imageIds: []
+})
 
 const activePersonCollectionId = computed(() => {
   if (!currentView.value.startsWith('collection:')) return null
@@ -743,6 +810,70 @@ function openContextMenu(item: any, event: MouseEvent) {
 
 function closeContextMenu() {
   contextMenu.value.visible = false
+}
+
+const contextMenuStyle = computed(() => {
+  const MENU_W = 200
+  const MENU_H = 180
+  const x = Math.min(contextMenu.value.x, window.innerWidth - MENU_W - 8)
+  const y = Math.min(contextMenu.value.y, window.innerHeight - MENU_H - 8)
+  return { left: `${x}px`, top: `${y}px` }
+})
+
+const contextMenuIsFavorite = computed(() =>
+  favoritesStore.isFavorite(contextMenu.value.imageId)
+)
+
+function contextMenuOpen() {
+  const img = displayedImages.value.find(i => i.id === contextMenu.value.imageId)
+  closeContextMenu()
+  if (img) handleImageOpen(img, new MouseEvent('click'))
+}
+
+function contextMenuToggleFavorite() {
+  const id = contextMenu.value.imageId
+  closeContextMenu()
+  if (favoritesStore.isFavorite(id)) {
+    favoritesStore.removeFavorites([id])
+  } else {
+    favoritesStore.addFavorites([id])
+  }
+}
+
+function contextMenuExport() {
+  const img = displayedImages.value.find(i => i.id === contextMenu.value.imageId)
+  const filename = img?.path?.split('/').pop() || 'image'
+  exportModal.value = { visible: true, imageId: contextMenu.value.imageId, filename, imageIds: [] }
+  closeContextMenu()
+}
+
+function bulkExportSelected() {
+  const ids = libraryStore.selectedImages.map(img => img.id)
+  if (!ids.length) return
+  exportModal.value = { visible: true, imageId: '', filename: '', imageIds: ids }
+}
+
+async function contextMenuReject() {
+  const id = contextMenu.value.imageId
+  closeContextMenu()
+  await rejectSingleImage(id)
+}
+
+async function contextMenuRestore() {
+  if (!catalogStore.activeCatalog) return
+  const id = contextMenu.value.imageId
+  closeContextMenu()
+  try {
+    await fetch(`/api/catalogs/${catalogStore.activeCatalog.id}/images/bulk-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_ids: [id], status: 'active' }),
+    })
+    libraryStore.removeImageIds([id])
+    await fetchSmartViewStats()
+  } catch (e) {
+    console.error('Failed to restore image:', e)
+  }
 }
 
 async function removeFaceMatch() {

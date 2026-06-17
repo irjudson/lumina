@@ -1,33 +1,36 @@
 # lumina
 
-Lumina is a personal media cataloging and curation application that organizes images and videos, allowing users to tag, search, and browse their collections with AI-powered groupings.
+Lumina is a photo management and editing application that allows users to organize, edit, and export photos with advanced tools like highlights/shadows adjustments, multiple size presets, and bulk operations. It supports RAW file formats and provides both web-based UI for browsing and desktop-style editing workflows.
 
-**Stack:** Python (FastAPI), Vue.js, PostgreSQL, Docker
+**Stack:** Python (FastAPI), PostgreSQL, Vue.js 3, TypeScript, Tailwind CSS
 
 ## Current Status
-- Media cataloging backend supports image/video ingestion with thumbnail caching
-- Frontend UI enables tagging, grouping, and browsing of media assets
-- Merge functionality added for combining duplicate folk tags via a new API endpoint and UI modal
+- Photo management application with full CRUD operations on images
+- Supports RAW file formats including ARW and HEIC
+- Has a web-based UI for browsing, editing, and exporting photos
+- Features include highlights/shadows adjustments, multiple export size presets, and bulk exports
 
 ## Recent Decisions
-- 2024-06-07: Added merge endpoint `/folk-tags/{id}/merge` to consolidate duplicate folk tags by re-pointing image references, updating ml_groups tag_id, then deleting the source tag
-- 2024-06-07: Improved thumbnail serving logic to check cache before validating source path and added placeholder for unprocessable video files
+- 2026-06-16: Added server-side image export functionality with ZIP support for selected images
+- 2026-06-16: Implemented live preview of highlights/shadows in the editing UI using canvas rendering
+- 2026-06-16: Introduced bulk export capability via a new endpoint and modal update to handle multiple image IDs
 
 ## Open Issues
-- Video thumbnails are not generated due to missing ffmpeg integration
-- Some media entries may have broken links if original sources were deleted or moved
+- Download functionality requires server restart for Python route changes due to uvicorn PID 1 process supervision
 
 ## Key Files
-- `/home/irjudson/Projects/lumina/api/main.py`: Main FastAPI application entry point with routes for catalogs, images, and folk tags including new merge functionality
-- `/home/irjudson/Projects/lumina/api/routes/folk_tags.py`: Route definitions handling CRUD operations on folk tags, including the new POST /merge endpoint
-- `/home/irjudson/Projects/lumina/frontend/src/views/CurateView.vue`: Main curation view displaying media grid and right panel for tag details with merge button UI
-- `/home/irjudson/Projects/lumina/api/models.py`: Database models defining structures like Catalog, Image, FolkTag, MLGroup used throughout the app
-- `/home/irjudson/Projects/lumina/frontend/src/store/index.js`: Vuex store managing application state including folk tag data and UI interactions for merge flow
-- `/home/irjudson/Projects/lumina/api/routes/images.py`: Image handling endpoints, including thumbnail generation and serving logic improved to prioritize cache lookups
-- `/home/irjudson/Projects/lumina/frontend/src/components/FolkTagDetailPanel.vue`: Component rendering tag details in the right panel with buttons for delete and merge actions
-- `/home/irjudson/Projects/lumina/api/database.py`: Database connection setup using SQLAlchemy ORM to manage PostgreSQL schema and queries across models
+- `/home/irjudson/Projects/lumina/backend/main.py`: Main FastAPI application entry point with routing including new export endpoints
+- `/home/irjudson/Projects/lumina/backend/models/image.py`: Database model for image metadata and storage location tracking
+- `/home/irjudson/Projects/lumina/frontend/src/components/ImageEditor.vue`: Vue component that renders the live preview of edited images with canvas-based highlights/shadows effect
+- `/home/irjudson/Projects/lumina/backend/routers/export.py`: Router module defining endpoints for single and bulk image exports to JPEG/WebP/PNG formats
+- `/home/irjudson/Projects/lumina/frontend/src/components/ExportModal.vue`: Vue modal component that handles user input for filename, format, quality, size preset during export process
+- `/home/irjudson/Projects/lumina/backend/utils/image_processor.py`: Utility functions to perform image transformations including resizing and applying rotation/flips before export
+- `/home/irjudson/Projects/lumina/frontend/src/views/Library.vue`: Main view showing the photo grid with selection capabilities, bulk action panel, and context menu options
+- `/home/irjudson/Projects/lumina/backend/routers/image.py`: Router module handling image CRUD operations such as fetching metadata or updating edits like rotation and flip flags
 
 ## Recent Activity
-- 2024-06-07: Implemented folk tag merging API endpoint and frontend modal with store integration for consolidating duplicate tags
-- 2024-06-07: Fixed thumbnail serving logic to check cache before validating source path, preventing broken thumbnails on temporarily inaccessible files
-- 2024-06-07: Added placeholder support in image thumbnail generation for video formats not supported by PIL
+- 2026-06-16: Added export-web route to backend for single images, implemented triggerDownload function with proper blob URL lifecycle management
+- 2026-06-16: Integrated canvas-based live preview of highlights/shadows in ImageEditor.vue component using offscreen rendering technique
+- 2026-06-16: Updated ExportModal to support multi-image mode and custom filename fields, added bulk export button in Library view
+- 2026-06-16: Implemented server-side ZIP generation for multiple image exports with configurable prefix naming scheme
+- 2026-06-16: Fixed download triggering logic by anchoring <a> element to DOM and deferring blob URL revocation
