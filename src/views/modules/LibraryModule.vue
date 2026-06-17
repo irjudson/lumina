@@ -1334,23 +1334,29 @@ async function restoreAllRejected() {
 async function rejectSingleImage(imageId: string) {
   if (!catalogStore.activeCatalog) return
   try {
+    // Capture position before removal — after removeImageIds the rejected image is gone
+    const positionBeforeRemoval = showDetail.value
+      ? displayedImages.value.findIndex(img => img.id === imageId)
+      : -1
+
     await fetch(`/api/catalogs/${catalogStore.activeCatalog.id}/images/bulk-status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_ids: [imageId], status: 'rejected' }),
     })
     libraryStore.removeImageIds([imageId])
-    // If viewing in overlay, advance to next image or close
+
     if (showDetail.value) {
       const remaining = displayedImages.value
       if (remaining.length === 0) {
         showDetail.value = false
       } else {
-        // Stay at same index (now points to next image) or back one if at end
-        const currentIdx = remaining.findIndex(img => img.id === detailImageId.value)
-        if (currentIdx === -1) {
-          detailImageId.value = remaining[Math.min(0, remaining.length - 1)].id
-        }
+        // Land on the image that was directly after the rejected one, or the new last image
+        const nextIdx = Math.min(
+          positionBeforeRemoval >= 0 ? positionBeforeRemoval : 0,
+          remaining.length - 1
+        )
+        detailImageId.value = remaining[nextIdx].id
       }
     }
   } catch (e) {
