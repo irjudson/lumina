@@ -61,6 +61,11 @@ export const useCameraImportStore = defineStore('cameraImport', () => {
       }
     } finally {
       isDiscovering.value = false
+      // Update the device list count to reflect new (unimported) photos, not total
+      if (selectedDevice.value) {
+        const dev = devices.value.find(d => d.path === selectedDevice.value!.path)
+        if (dev) dev.file_count_estimate = discoveredFiles.value.length
+      }
     }
   }
 
