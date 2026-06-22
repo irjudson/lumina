@@ -512,12 +512,12 @@ def list_catalog_images(
     order_clauses = {
         "date": (
             f"CASE WHEN (dates->>'selected_date')::timestamp > NOW() THEN NULL "
-            f"ELSE (dates->>'selected_date')::timestamp END {order_direction} NULLS LAST"
+            f"ELSE (dates->>'selected_date')::timestamp END {order_direction} NULLS LAST, id ASC"
         ),
-        "filename": f"source_path {order_direction}",
-        "size": f"size_bytes {order_direction}",
-        "camera": f"metadata->>'camera_model' {order_direction} NULLS LAST",
-        "created_at": f"created_at {order_direction}",
+        "filename": f"source_path {order_direction}, id ASC",
+        "size": f"size_bytes {order_direction}, id ASC",
+        "camera": f"metadata->>'camera_model' {order_direction} NULLS LAST, id ASC",
+        "created_at": f"created_at {order_direction}, id ASC",
     }
     order_by = order_clauses.get(sort_by, order_clauses["date"])
 
@@ -1606,7 +1606,7 @@ def get_images_in_cluster(
             dates->>'selected_date' as photo_date
         FROM images
         WHERE {where_clause}
-        ORDER BY (dates->>'selected_date')::timestamp DESC NULLS LAST
+        ORDER BY (dates->>'selected_date')::timestamp DESC NULLS LAST, id ASC
         LIMIT :limit OFFSET :offset
     """
     )
@@ -2804,11 +2804,11 @@ def list_bursts(
 
     # Determine sort order
     if sort == "oldest":
-        order_by = "b.start_time ASC"
+        order_by = "b.start_time ASC, b.id ASC"
     elif sort == "largest":
-        order_by = "b.image_count DESC"
+        order_by = "b.image_count DESC, b.id ASC"
     else:  # newest (default)
-        order_by = "b.start_time DESC"
+        order_by = "b.start_time DESC, b.id ASC"
 
     # Get bursts with member count
     query = text(
